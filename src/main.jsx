@@ -1,10 +1,10 @@
 import React from "react";
-import ReactDOM from "react-dom/client";
+import { createRoot } from "react-dom/client";
+import App from "./CarpetPlanner";
 import "./index.css";
-import CarpetPlanner from "./CarpetPlanner";
 
-ReactDOM.createRoot(document.getElementById("root")).render(
+createRoot(document.getElementById("root")).render(
   <React.StrictMode>
-    <CarpetPlanner />
+    <App />
   </React.StrictMode>
 );

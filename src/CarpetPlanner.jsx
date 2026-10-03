@@ -192,46 +192,326 @@ function requiredLength(instances, roomsById) {
 
 /* ======================================================================
    SECTION: PACKING LAYER (auto-arrange)
-   Practical shelf-packing heuristic for orthogonal polygons. Produces a
-   "Suggested Layout" only — never claimed to be globally optimal, and the
-   user can freely rearrange the result afterwards.
+
+   Honest framing: 2D nesting with rotation is NP-hard — true exhaustive
+   branch-and-bound to PROVEN global optimality is not computationally
+   reachable client-side for anything but trivial instances, and no real
+   nesting system (commercial or otherwise) actually does this within an
+   interactive time budget. What this layer does instead, and does exactly
+   rather than approximately:
+
+   1. EXACT geometry, not bounding boxes. Every placement test below works
+      on each room's actual rectilinear decomposition (the same `decompose`
+      used by collision detection elsewhere in this file) — an L-shaped
+      room's concave notch is real free space, not reserved dead space.
+
+   2. A true No-Fit-Polygon, generalised to this app's rotation set
+      (0/90/180/270°, matching the rotation restrictions already enforced
+      for grain direction — continuous/arbitrary rotation is intentionally
+      excluded because it would misalign a room from its real measured
+      wall lengths). For axis-aligned rectilinear shapes the NFP of two
+      polygons is exactly the union of pairwise Minkowski sums of their
+      decomposed rectangles — `forbiddenRectsForPiece` below computes this
+      precisely, so every candidate placement is gap-free and exact, never
+      a heuristic approximation.
+
+   3. Bottom-left-fill seeded from the NFP's own forbidden-region corners
+      (`bottomLeftPlace`) — the only placement points that can possibly be
+      "tightest fit" are at those corners, so this is an exact search over
+      the genuinely relevant candidate set, not a coarse grid.
+
+   4. A GUILLOTINE packer (`guillotineArrangeWithOrder`) as an alternative
+      placement method, for when the priority is a layout a person can
+      actually cut with a straight knife — every cut it produces runs the
+      full span of whatever piece it's cutting from, never jogging around
+      a corner. It works on bounding boxes rather than exact polygons
+      (conservative but always overlap-safe, including for L-shaped
+      rooms), so it can't tuck a piece into another's notch the way the
+      NFP placer can, trading a little density for cuttability.
+
+   5. A simulated-annealing metaheuristic (`autoArrange`) searches over
+      placement ORDER and per-piece ROTATION — using whichever of the two
+      placers above was requested — re-evaluating each candidate sequence
+      and keeping the best result found under a time budget. Symmetry is
+      broken for interchangeable identical pieces (same room, same
+      rotation) so swapping two such pieces — which can never change the
+      result — is never wastefully re-evaluated.
+
+   The result is always labelled a "Suggested Layout": the best arrangement
+   found, not a claim of global optimality.
    ====================================================================== */
 
-function autoArrange(instanceList, roomsById, rollWidth, tolerance, grainMode) {
-  // Expand list to one entry per physical piece (respecting quantities already
-  // encoded as separate instances) and try to pack tallest-first, left-to-right,
-  // shelf by shelf, testing both 0deg and 90deg orientation when allowed.
-  const items = instanceList.map((inst) => ({ inst, room: roomsById[inst.roomId] })).filter((i) => i.room);
+// Exact Minkowski-sum-based forbidden region: the set of positions for a
+// moving piece's origin that would make a given (already-inflated) moving
+// rectangle overlap a given (already-inflated) stationary rectangle.
+function minkowskiForbiddenRect(stationary, moving) {
+  return {
+    x: stationary.x - moving.x - moving.w,
+    y: stationary.y - moving.y - moving.h,
+    w: stationary.w + moving.w,
+    h: stationary.h + moving.h,
+  };
+}
 
-  const canRotate90 = grainMode !== "locked";
-  const orientationsFor = () => (canRotate90 ? [0, 90] : [0]);
+// All forbidden rectangles for a candidate piece's ORIGIN, exact (no
+// bounding-box shortcuts): decomposes the candidate at its trial rotation
+// and every already-placed instance into real rectangles, and computes the
+// pairwise Minkowski sum for each pair. allowanceMm is split evenly as the
+// existing collision system does.
+function forbiddenRectsForPiece(movingVerts, placedInstances, roomsById, allowanceMm) {
+  const movingRects = decompose(movingVerts).map((r) => inflateRect(r, allowanceMm / 2));
+  const forbidden = [];
+  for (const other of placedInstances) {
+    const otherRoom = roomsById[other.roomId];
+    if (!otherRoom) continue;
+    const otherVerts = instanceVertices(otherRoom, other);
+    const otherTol = other.allowanceOverride != null && other.allowanceOverride !== "" ? parseFloat(other.allowanceOverride) : allowanceMm;
+    const stationaryRects = decompose(otherVerts).map((r) => inflateRect(r, otherTol / 2));
+    for (const sr of stationaryRects) for (const mr of movingRects) forbidden.push(minkowskiForbiddenRect(sr, mr));
+  }
+  return forbidden;
+}
 
+function pointInsideRect(x, y, r) {
+  return x > r.x + EPS && x < r.x + r.w - EPS && y > r.y + EPS && y < r.y + r.h - EPS;
+}
+
+// Exact bottom-left-fill: places one piece as low, then as far left, as the
+// real geometry allows, using only the NFP's own forbidden-region corners
+// as candidate points (the only points that can possibly be tightest-fit).
+function bottomLeftPlace(room, rotation, placedInstances, roomsById, rollWidth, tolerance) {
+  const movingVerts = rotatePolygon(room.vertices, rotation);
+  const bb = boundingBox(movingVerts);
+  const w = bb.maxX - bb.minX, h = bb.maxY - bb.minY;
+  const minX = tolerance / 2, maxX = rollWidth - w - tolerance / 2;
+  if (maxX < minX - EPS) return null; // doesn't fit the roll width at all, even alone
+
+  const forbidden = forbiddenRectsForPiece(movingVerts, placedInstances, roomsById, tolerance);
+
+  // Candidate points: the full grid of each forbidden rectangle's left/right
+  // x-edges crossed with each rectangle's bottom/top y-edges, plus the roll's
+  // own left edge and y=0. A single rectangle's own two "outer" corners are
+  // not enough on their own — a concave notch formed by TWO rectangles (an
+  // L-shaped room's cut corner, for instance) only has a valid touching
+  // point at the combination of one rect's x-edge and a different rect's
+  // y-edge, so every combination has to be considered to stay exact.
+  const xs = new Set([Math.max(0, minX)]);
+  const ys = new Set([0]);
+  forbidden.forEach((f) => { xs.add(f.x); xs.add(f.x + f.w); ys.add(f.y); ys.add(f.y + f.h); });  const xList = [...xs].filter((x) => x >= minX - EPS && x <= maxX + EPS);
+  const yList = [...ys].filter((y) => y >= -EPS);
+  yList.sort((a, b) => a - b);
+  xList.sort((a, b) => a - b);
+
+  let bestPt = null;
+  outer:
+  for (const y of yList) {
+    if (bestPt && y > bestPt.y + EPS) break;
+    for (const x of xList) {
+      if (x < minX - EPS || x > maxX + EPS) continue;
+      if (forbidden.some((f) => pointInsideRect(x, y, f))) continue;
+      bestPt = { x, y };
+      break outer; // yList and xList are sorted ascending, so the first hit at the lowest y is already leftmost-at-that-y
+    }
+  }
+  if (bestPt) return bestPt;
+
+  // Guaranteed-correct fallback: stack clear above every forbidden region.
+  const topY = forbidden.reduce((m, f) => Math.max(m, f.y + f.h), 0);
+  return { x: Math.max(0, minX), y: topY };
+}
+
+function arrangeWithOrder(orderedItems, roomsById, rollWidth, tolerance) {
   const placed = [];
-  const dims = items.map(({ inst, room }) => {
-    let best = null;
-    for (const rot of orientationsFor()) {
-      const bb = boundingBox(rotatePolygon(room.vertices, rot));
-      const w = bb.maxX - bb.minX, h = bb.maxY - bb.minY;
-      if (w <= rollWidth + EPS && (!best || h < best.h)) best = { rot, w, h };
-    }
-    if (!best) best = { rot: 0, w: boundingBox(room.vertices).maxX, h: boundingBox(room.vertices).maxY };
-    return { inst, room, ...best };
-  });
-  dims.sort((a, b) => b.h - a.h);
+  for (const { inst, rotation } of orderedItems) {
+    const room = roomsById[inst.roomId];
+    if (!room) continue;
+    const pos = bottomLeftPlace(room, rotation, placed, roomsById, rollWidth, tolerance);
+    if (!pos) continue; // piece cannot fit the roll width in this rotation; skip rather than corrupt the layout
+    placed.push({ ...inst, rotation, x: pos.x, y: pos.y });
+  }
+  return placed;
+}
 
-  let shelfY = tolerance, shelfHeight = 0, cursorX = tolerance;
-  const results = [];
-  dims.forEach(({ inst, room, rot, w, h }) => {
-    if (cursorX + w > rollWidth - tolerance && cursorX > tolerance) {
-      shelfY += shelfHeight + tolerance;
-      cursorX = tolerance;
-      shelfHeight = 0;
+/* ----------------------------------------------------------------------
+   Guillotine packing: every cut this produces runs straight across the
+   current piece being cut from, edge to edge — the only kind of cut a
+   roll of carpet can realistically take with a straight knife and a
+   metre rule, as opposed to the free-form nesting above, which can tuck
+   a piece into another's concave notch but may leave cut lines that jog
+   around a corner (no problem for a CNC cutter; a real problem for
+   someone cutting by hand). This works on each room's bounding box
+   rather than its exact polygon — strictly conservative, since a room's
+   true (possibly L-shaped) footprint always sits inside its own bounding
+   box, so two bounding boxes placed without overlap can never let the
+   real shapes overlap either, even though it can't nest a piece into
+   another's notch the way the exact-NFP placer above can.
+
+   Classic guillotine bin-packing: a list of free rectangles is kept,
+   starting as one rectangle spanning the whole roll (width fixed, length
+   effectively unbounded). Each placed piece's bounding box is cut from
+   whichever free rectangle it fits most snugly ("best short-side fit"),
+   and that free rectangle is then itself split by ONE straight cut into
+   up to two new free rectangles — recursively, so the whole structure
+   stays guillotine-cuttable no matter how many pieces are placed.
+   ---------------------------------------------------------------------- */
+function guillotineArrangeWithOrder(orderedItems, roomsById, rollWidth, tolerance) {
+  const BIG = 1e9;
+  let freeRects = [{ x: 0, y: 0, w: rollWidth, h: BIG }];
+  const placed = [];
+
+  for (const { inst, rotation } of orderedItems) {
+    const room = roomsById[inst.roomId];
+    if (!room) continue;
+    const bb = boundingBox(rotatePolygon(room.vertices, rotation));
+    const w0 = bb.maxX - bb.minX, h0 = bb.maxY - bb.minY;
+
+    let bestIdx = -1, bestScore = Infinity;
+    for (let i = 0; i < freeRects.length; i++) {
+      const r = freeRects[i];
+      if (r.w >= w0 - EPS && r.h >= h0 - EPS) {
+        const score = Math.min(r.w - w0, r.h - h0); // best short-side fit
+        if (score < bestScore) { bestScore = score; bestIdx = i; }
+      }
     }
-    results.push({ ...inst, x: cursorX, y: shelfY, rotation: rot });
-    cursorX += w + tolerance;
-    shelfHeight = Math.max(shelfHeight, h);
+    if (bestIdx === -1) continue; // cannot fit this piece's bounding box anywhere; skip rather than corrupt the layout
+
+    const rect = freeRects[bestIdx];
+    placed.push({ ...inst, rotation, x: rect.x, y: rect.y });
+    freeRects.splice(bestIdx, 1);
+
+    const leftoverW = rect.w - w0 - tolerance;
+    const leftoverH = rect.h - h0 - tolerance;
+    const next = [];
+    // Shorter-leftover-axis rule: whichever direction has less slack gets
+    // the full-span cut first, keeping the resulting free rectangles as
+    // usable (least sliver-shaped) as the guillotine constraint allows.
+    if (leftoverW <= leftoverH) {
+      if (leftoverW > EPS) next.push({ x: rect.x + w0 + tolerance, y: rect.y, w: leftoverW, h: h0 });
+      if (leftoverH > EPS) next.push({ x: rect.x, y: rect.y + h0 + tolerance, w: rect.w, h: leftoverH });
+    } else {
+      if (leftoverH > EPS) next.push({ x: rect.x, y: rect.y + h0 + tolerance, w: w0, h: leftoverH });
+      if (leftoverW > EPS) next.push({ x: rect.x + w0 + tolerance, y: rect.y, w: leftoverW, h: rect.h });
+    }
+    freeRects.push(...next);
+  }
+  return placed;
+}
+
+function allowedRotationsFor(grainMode) {
+  return grainMode === "locked" ? [0] : [0, 90, 180, 270];
+}
+
+function bestDefaultRotation(room, rollWidth, allowedRotations) {
+  let best = allowedRotations[0], bestH = Infinity;
+  for (const rot of allowedRotations) {
+    const bb = boundingBox(rotatePolygon(room.vertices, rot));
+    const w = bb.maxX - bb.minX, h = bb.maxY - bb.minY;
+    if (w <= rollWidth + EPS && h < bestH) { bestH = h; best = rot; }
+  }
+  return best;
+}
+
+// Simulated annealing over (placement order, per-piece rotation), each
+// candidate evaluated with the exact NFP + bottom-left-fill placer above.
+// Time-budgeted so it stays responsive regardless of instance count.
+function autoArrange(instanceList, roomsById, rollWidth, tolerance, grainMode, guillotine) {
+  const allowedRotations = allowedRotationsFor(grainMode);
+  const n = instanceList.length;
+  if (n === 0) return [];
+  const placer = guillotine ? guillotineArrangeWithOrder : arrangeWithOrder;
+
+  // Rotation is tracked per ROOM, not per instance: every placed copy of
+  // the same room (e.g. several identical "Stairs" pieces cut from one
+  // duplicated entry) always shares one rotation, because carpet pile/grain
+  // direction has to run the same way across duplicates of the same piece
+  // — the search is never allowed to spin one copy differently from its
+  // siblings just because that happens to pack a little tighter.
+  const roomIds = [...new Set(instanceList.map((i) => i.roomId))];
+  let rotByRoom = {};
+  roomIds.forEach((id) => {
+    const room = roomsById[id];
+    rotByRoom[id] = room ? bestDefaultRotation(room, rollWidth, allowedRotations) : 0;
   });
-  return results;
+
+  let order = instanceList.map((inst) => ({ inst }));
+  // Decreasing-height start is a strong seed for bottom-left-fill.
+  order.sort((a, b) => {
+    const ra = boundingBox(rotatePolygon(roomsById[a.inst.roomId]?.vertices || [{ x: 0, y: 0 }], rotByRoom[a.inst.roomId] || 0));
+    const rb = boundingBox(rotatePolygon(roomsById[b.inst.roomId]?.vertices || [{ x: 0, y: 0 }], rotByRoom[b.inst.roomId] || 0));
+    return (rb.maxY - rb.minY) - (ra.maxY - ra.minY);
+  });
+
+  function evaluate(seq, rotations) {
+    const withRot = seq.map((s) => ({ inst: s.inst, rotation: rotations[s.inst.roomId] || 0 }));
+    const placed = placer(withRot, roomsById, rollWidth, tolerance);
+    return { placed, length: requiredLength(placed, roomsById) };
+  }
+
+  let current = order, currentRot = rotByRoom;
+  let evald = evaluate(current, currentRot);
+  let bestPlaced = evald.placed, bestLen = evald.length;
+  let currentLen = evald.length;
+
+  if (n <= 1) return bestPlaced;
+
+  // Budget scales down per-iteration cost as the instance count grows, so
+  // a big project still finishes promptly rather than freezing the tab.
+  const timeBudgetMs = Math.min(2500, 400 + n * 40);
+  const iterCap = Math.max(150, Math.floor(30000 / n));
+  let T = Math.max(currentLen * 0.04, 50);
+  const cooling = 0.97;
+  const startTime = Date.now();
+  let iter = 0;
+
+  while (iter < iterCap && Date.now() - startTime < timeBudgetMs) {
+    iter++;
+    const next = current.map((s) => ({ ...s }));
+    let nextRot = currentRot;
+    const roll = Math.random();
+    if (roll < 0.45) {
+      // Swap two positions in the sequence.
+      const i = Math.floor(Math.random() * n), j = Math.floor(Math.random() * n);
+      if (i === j) continue;
+      // Symmetry-breaking: swapping two instances of the SAME room is a
+      // no-op (they already share one rotation by construction above), so
+      // the search never wastes iterations re-evaluating something that
+      // can't possibly change the layout.
+      if (next[i].inst.roomId === next[j].inst.roomId) continue;
+      const tmp = next[i]; next[i] = next[j]; next[j] = tmp;
+    } else if (roll < 0.75) {
+      // Try a different rotation for one ROOM — applies to every instance
+      // of it at once, keeping duplicates consistent with each other.
+      const roomId = roomIds[Math.floor(Math.random() * roomIds.length)];
+      const room = roomsById[roomId];
+      if (!room) continue;
+      const options = allowedRotations.filter((r) => {
+        const bb = boundingBox(rotatePolygon(room.vertices, r));
+        return bb.maxX - bb.minX <= rollWidth + EPS;
+      });
+      if (options.length <= 1) continue;
+      let r;
+      let tries = 0;
+      do { r = options[Math.floor(Math.random() * options.length)]; tries++; } while (r === currentRot[roomId] && tries < 6);
+      nextRot = { ...currentRot, [roomId]: r };
+    } else {
+      // Move one piece to a different point in the sequence.
+      const i = Math.floor(Math.random() * n), j = Math.floor(Math.random() * n);
+      if (i === j) continue;
+      const [item] = next.splice(i, 1);
+      next.splice(j, 0, item);
+    }
+    const nextEval = evaluate(next, nextRot);
+    const delta = nextEval.length - currentLen;
+    if (delta < 0 || Math.random() < Math.exp(-delta / Math.max(T, 1e-6))) {
+      current = next;
+      currentRot = nextRot; // an accepted rotation change has to actually stick, or every later iteration keeps re-trying from the original starting rotation instead of building on what was just accepted
+      currentLen = nextEval.length;
+      if (currentLen < bestLen - EPS) { bestPlaced = nextEval.placed; bestLen = currentLen; }
+    }
+    T *= cooling;
+  }
+
+  return bestPlaced;
 }
 
 /* ======================================================================
@@ -275,22 +555,34 @@ const ROOM_COLORS = ["#c98a3a", "#3c7a6f", "#8a5fb0", "#4a7fb5", "#b5583f", "#5a
 
 const STORAGE_KEY = "carpet-cutting-planner:project";
 
-function loadProject() {
+// window.storage is only available inside the Claude.ai artifact preview.
+// On a standalone deployed site (e.g. this app hosted from GitHub) it's
+// undefined, so autosave falls back to plain localStorage there instead.
+async function loadProject() {
   try {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    return saved ? JSON.parse(saved) : null;
-  } catch (e) {
-    console.error("load failed", e);
-    return null;
-  }
+    if (typeof window !== "undefined" && window.storage?.get) {
+      const res = await window.storage.get(STORAGE_KEY, false);
+      if (res?.value) return JSON.parse(res.value);
+      return null;
+    }
+  } catch (e) { /* fall through to localStorage */ }
+  try {
+    const raw = typeof window !== "undefined" && window.localStorage ? window.localStorage.getItem(STORAGE_KEY) : null;
+    if (raw) return JSON.parse(raw);
+  } catch (e) { /* nothing saved yet */ }
+  return null;
 }
 
-function saveProject(data) {
+async function saveProject(data) {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
-  } catch (e) {
-    console.error("save failed", e);
-  }
+    if (typeof window !== "undefined" && window.storage?.set) {
+      await window.storage.set(STORAGE_KEY, JSON.stringify(data), false);
+      return;
+    }
+  } catch (e) { /* fall through to localStorage */ }
+  try {
+    if (typeof window !== "undefined" && window.localStorage) window.localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+  } catch (e) { console.error("save failed", e); }
 }
 
 /* ======================================================================
@@ -304,8 +596,7 @@ function RoomThumbnail({ vertices, color, size = 72 }) {
   const scale = Math.min((size - pad * 2) / w, (size - pad * 2) / h);
   const pts = vertices.map((v) => `${(v.x - bb.minX) * scale + pad},${(v.y - bb.minY) * scale + pad}`).join(" ");
   return (
-    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} className="shrink-0">
-      <polygon points={pts} fill={color + "33"} stroke={color} strokeWidth="2" strokeLinejoin="round" />
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} className="shrink-0">      <polygon points={pts} fill={color + "33"} stroke={color} strokeWidth="2" strokeLinejoin="round" />
     </svg>
   );
 }
@@ -604,8 +895,7 @@ function AddRoomModal({ initialRoom, onClose, onSave, displayUnit }) {
 
         {step === "dims" && (
           <div className="p-5">
-            <div className="flex items-center justify-between mb-3">
-              <p className="text-xs text-stone-500">Enter the real length of every wall — the shape on the left shows which side each number belongs to. Leave one wall per axis blank to have it calculated automatically.</p>
+            <div className="flex items-center justify-between mb-3">              <p className="text-xs text-stone-500">Enter the real length of every wall — the shape on the left shows which side each number belongs to. Leave one wall per axis blank to have it calculated automatically.</p>
               <select value={unit} onChange={(e) => setUnit(e.target.value)} className="text-xs border border-stone-300 rounded-xl px-2 py-1 bg-white shrink-0 ml-3">
                 <option value="mm">mm</option><option value="cm">cm</option><option value="m">m</option>
               </select>
@@ -699,7 +989,7 @@ function AddRoomModal({ initialRoom, onClose, onSave, displayUnit }) {
    SECTION: LEFT SIDEBAR — rooms library + roll settings
    ====================================================================== */
 
-function LeftSidebar({ rooms, onAddRoom, onEditRoom, onDeleteRoom, onDuplicateRoom, onQuantityChange, onPlaceOnCarpet, rollWidth, setRollWidth, unit, setUnit, tolerance, setTolerance, grainMode, setGrainMode, gridSize, setGridSize, snapEnabled, setSnapEnabled, allowOverlap, setAllowOverlap }) {
+function LeftSidebar({ rooms, onAddRoom, onEditRoom, onDeleteRoom, onDuplicateRoom, onQuantityChange, onPlaceOnCarpet, rollWidth, setRollWidth, unit, setUnit, tolerance, setTolerance, grainMode, setGrainMode, gridSize, setGridSize, snapEnabled, setSnapEnabled, allowOverlap, setAllowOverlap, guillotineMode, setGuillotineMode }) {
   const [tab, setTab] = useState("rooms");
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
@@ -827,6 +1117,17 @@ function LeftSidebar({ rooms, onAddRoom, onEditRoom, onDeleteRoom, onDuplicateRo
               </Field>
               <div className="pt-1 border-t border-stone-200">
                 <label className="flex items-center gap-2 text-xs text-stone-700 pt-3 cursor-pointer">
+                  <input type="checkbox" checked={guillotineMode} onChange={(e) => setGuillotineMode(e.target.checked)} />
+                  Auto Arrange: keep cuts easy to make by hand
+                </label>
+                <p className="text-[10px] text-stone-400 mt-1">
+                  {guillotineMode
+                    ? "On by default: every cut Auto Arrange produces runs straight across the piece it's cutting from — easy with a knife and rule, though it may use a little more carpet."
+                    : "Pieces can nest into any gap, including the notch of an L-shaped room, for the tightest possible fit — but the cut lines between pieces may not be straight."}
+                </p>
+              </div>
+              <div>
+                <label className="flex items-center gap-2 text-xs text-stone-700 cursor-pointer">
                   <input type="checkbox" checked={allowOverlap} onChange={(e) => setAllowOverlap(e.target.checked)} />
                   Allow pieces to overlap
                 </label>
@@ -893,8 +1194,7 @@ function RightSidebar({ instance, room, onRotate, onDelete, onDuplicate, onAllow
 
 function CuttingCanvas({ rooms, roomsById, instances, setInstances, rollWidth, tolerance, gridSize, snapEnabled, selectedId, setSelectedId, commitHistory, allowOverlap }) {
   const containerRef = useRef(null);
-  const [pxPerMm, setPxPerMm] = useState(0.09);
-  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [pxPerMm, setPxPerMm] = useState(0.09);  const [pan, setPan] = useState({ x: 0, y: 0 });
   const dragState = useRef(null);
   const rafId = useRef(null);
   const pendingMouse = useRef(null);
@@ -903,9 +1203,14 @@ function CuttingCanvas({ rooms, roomsById, instances, setInstances, rollWidth, t
   const canvasLenMm = Math.max(reqLength + 1500, 3000);
 
   function screenToMm(clientX, clientY) {
-    const rect = containerRef.current.getBoundingClientRect();
-    const x = (clientX - rect.left - pan.x) / pxPerMm;
-    const y = (clientY - rect.top - pan.y) / pxPerMm;
+    const el = containerRef.current;
+    const rect = el.getBoundingClientRect();
+    // Scroll offset has to be added back in — the bounding rect is always
+    // relative to the viewport, regardless of how far the container itself
+    // has been scrolled, so without this a scrolled view would misplace
+    // every drag by exactly however much had been scrolled.
+    const x = (clientX - rect.left - pan.x + el.scrollLeft) / pxPerMm;
+    const y = (clientY - rect.top - pan.y + el.scrollTop) / pxPerMm;
     return { x, y };
   }
 
@@ -939,16 +1244,40 @@ function CuttingCanvas({ rooms, roomsById, instances, setInstances, rollWidth, t
     return Array.from({ length: Math.floor(canvasLenMm / gridSize) }, (_, i) => i);
   }, [snapEnabled, canvasLenMm, gridSize]);
 
-  // Magnetic snap to the roll's boundaries: left edge (x=0), right edge
-  // (x=rollWidth) and the start of the roll (y=0). A piece can lock onto
-  // 2 of these at once (e.g. a corner), or all 3 if it happens to span the
-  // full roll width. Threshold is in real mm, independent of grid snapping.
+  // Magnetic snap to the roll's boundaries (left edge x=0, right edge
+  // x=rollWidth, start of the roll y=0) AND to the edges of other pieces
+  // already on the carpet, so two pieces dragged close together lock
+  // together with their edges exactly touching rather than left with an
+  // awkward sliver gap or nudged into a (rejected) overlap. Each axis snaps
+  // independently to whichever candidate is nearest, within a small
+  // real-mm threshold that's independent of grid snapping.
   const EDGE_SNAP_MM = 40;
-  function snapToRollEdges(x, y, w, h) {
-    let nx = x, ny = y;
-    if (Math.abs(x) <= EDGE_SNAP_MM) nx = 0;
-    else if (Math.abs(x + w - rollWidth) <= EDGE_SNAP_MM) nx = rollWidth - w;
-    if (Math.abs(y) <= EDGE_SNAP_MM) ny = 0;
+  function snapToEdges(x, y, w, h, excludeId) {
+    let nx = x, ny = y, bestXDist = EDGE_SNAP_MM, bestYDist = EDGE_SNAP_MM;
+    if (Math.abs(x) <= bestXDist) { bestXDist = Math.abs(x); nx = 0; }
+    if (Math.abs(x + w - rollWidth) <= bestXDist) { bestXDist = Math.abs(x + w - rollWidth); nx = rollWidth - w; }
+    if (Math.abs(y) <= bestYDist) { bestYDist = Math.abs(y); ny = 0; }
+
+    instances.forEach((other) => {
+      if (other.id === excludeId) return;
+      const otherRoom = roomsById[other.roomId];
+      if (!otherRoom) return;
+      const obb = boundingBox(instanceVertices(otherRoom, other));
+      const yOverlaps = y < obb.maxY && y + h > obb.minY;
+      const xOverlaps = x < obb.maxX && x + w > obb.minX;
+      if (yOverlaps) {
+        const dRight = Math.abs(x - obb.maxX); // this piece's left touching the other's right
+        if (dRight <= bestXDist) { bestXDist = dRight; nx = obb.maxX; }
+        const dLeft = Math.abs(x + w - obb.minX); // this piece's right touching the other's left
+        if (dLeft <= bestXDist) { bestXDist = dLeft; nx = obb.minX - w; }
+      }
+      if (xOverlaps) {
+        const dBottom = Math.abs(y - obb.maxY); // this piece's top touching the other's bottom
+        if (dBottom <= bestYDist) { bestYDist = dBottom; ny = obb.maxY; }
+        const dTop = Math.abs(y + h - obb.minY); // this piece's bottom touching the other's top
+        if (dTop <= bestYDist) { bestYDist = dTop; ny = obb.minY - h; }
+      }
+    });
     return { x: nx, y: ny };
   }
 
@@ -962,7 +1291,7 @@ function CuttingCanvas({ rooms, roomsById, instances, setInstances, rollWidth, t
     const w = bb.maxX - bb.minX, h = bb.maxY - bb.minY;
     let px = Math.max(0, Math.min(rollWidth - w, snapVal(x - w / 2)));
     let py = Math.max(0, snapVal(y - h / 2));
-    const snapped = snapToRollEdges(px, py, w, h);
+    const snapped = snapToEdges(px, py, w, h, null);
     px = snapped.x; py = snapped.y;
     let newInst = {
       id: `inst_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
@@ -987,27 +1316,53 @@ function CuttingCanvas({ rooms, roomsById, instances, setInstances, rollWidth, t
     setSelectedId(inst.id);
     const startMm = screenToMm(e.clientX, e.clientY);
     dragState.current = { id: inst.id, offsetX: startMm.x - inst.x, offsetY: startMm.y - inst.y, lastValid: { x: inst.x, y: inst.y } };
+    pendingMouse.current = { clientX: e.clientX, clientY: e.clientY };
     window.addEventListener("mousemove", onDragMove);
     window.addEventListener("mouseup", onDragEnd);
+    // A continuous per-frame loop (rather than only reacting to mousemove)
+    // is what lets autoscroll keep going even while the mouse holds still
+    // near the bottom edge — a mousemove-only loop would stop scrolling the
+    // instant the cursor stops moving, even though it's still past the edge.
+    rafId.current = requestAnimationFrame(processDragFrame);
   }
 
   // Fast mouse movement can fire far more mousemove events than the app can
   // usefully process (each move re-checks collisions against every other
-  // room). Only the latest position is kept, and the actual work runs at
-  // most once per animation frame — this is what keeps a quick drag smooth
-  // instead of piling up work and freezing the tab.
+  // room), so only the latest position is kept here; the actual work runs
+  // in the continuous per-frame loop below instead of once per raw event.
   function onDragMove(e) {
     if (!dragState.current) return;
     pendingMouse.current = { clientX: e.clientX, clientY: e.clientY };
-    if (rafId.current != null) return;
-    rafId.current = requestAnimationFrame(processDragFrame);
   }
 
+  const AUTOSCROLL_EDGE_PX = 48, AUTOSCROLL_MAX_SPEED = 22;
+
   function processDragFrame() {
-    rafId.current = null;
     const ds = dragState.current;
     const mouse = pendingMouse.current;
-    if (!ds || !mouse) return;
+    if (!ds || !mouse) { rafId.current = null; return; }
+
+    // Autoscroll: if the cursor is held near the top/bottom (or left/right)
+    // edge of the visible canvas while dragging, scroll that direction so
+    // the piece can keep moving toward carpet that's off-screen below.
+    const el = containerRef.current;
+    if (el) {
+      const rect = el.getBoundingClientRect();
+      let dy = 0, dx = 0;
+      if (mouse.clientY > rect.bottom - AUTOSCROLL_EDGE_PX) {
+        dy = AUTOSCROLL_MAX_SPEED * Math.min(1, (mouse.clientY - (rect.bottom - AUTOSCROLL_EDGE_PX)) / AUTOSCROLL_EDGE_PX);
+      } else if (mouse.clientY < rect.top + AUTOSCROLL_EDGE_PX) {
+        dy = -AUTOSCROLL_MAX_SPEED * Math.min(1, ((rect.top + AUTOSCROLL_EDGE_PX) - mouse.clientY) / AUTOSCROLL_EDGE_PX);
+      }
+      if (mouse.clientX > rect.right - AUTOSCROLL_EDGE_PX) {
+        dx = AUTOSCROLL_MAX_SPEED * Math.min(1, (mouse.clientX - (rect.right - AUTOSCROLL_EDGE_PX)) / AUTOSCROLL_EDGE_PX);
+      } else if (mouse.clientX < rect.left + AUTOSCROLL_EDGE_PX) {
+        dx = -AUTOSCROLL_MAX_SPEED * Math.min(1, ((rect.left + AUTOSCROLL_EDGE_PX) - mouse.clientX) / AUTOSCROLL_EDGE_PX);
+      }
+      if (dy) el.scrollTop = Math.max(0, el.scrollTop + dy);
+      if (dx) el.scrollLeft = Math.max(0, el.scrollLeft + dx);
+    }
+
     const mm = screenToMm(mouse.clientX, mouse.clientY);
     let nx = snapVal(mm.x - ds.offsetX);
     let ny = Math.max(0, snapVal(mm.y - ds.offsetY));
@@ -1021,7 +1376,7 @@ function CuttingCanvas({ rooms, roomsById, instances, setInstances, rollWidth, t
       if (!room) return prev;
       const rotBB = boundingBox(rotatePolygon(room.vertices, instPrev.rotation));
       const w = rotBB.maxX - rotBB.minX, h = rotBB.maxY - rotBB.minY;
-      const snapped = snapToRollEdges(nx, ny, w, h);
+      const snapped = snapToEdges(nx, ny, w, h, ds.id);
       nx = snapped.x; ny = snapped.y;
       const next = prev.map((i) => (i.id === ds.id ? { ...i, x: nx, y: ny } : i));
       const inst = next.find((i) => i.id === ds.id);
@@ -1029,6 +1384,9 @@ function CuttingCanvas({ rooms, roomsById, instances, setInstances, rollWidth, t
       if (check.valid && dragState.current) dragState.current.lastValid = { x: nx, y: ny };
       return next;
     });
+
+    if (dragState.current) rafId.current = requestAnimationFrame(processDragFrame);
+    else rafId.current = null;
   }
 
   function onDragEnd() {
@@ -1116,10 +1474,10 @@ function CuttingCanvas({ rooms, roomsById, instances, setInstances, rollWidth, t
               </pattern>
             </defs>
             {/* grid */}
-            {snapEnabled && Array.from({ length: Math.floor(rollWidth / gridSize) }).map((_, i) => (
+            {gridLinesX.map((i) => (
               <line key={"gx" + i} x1={i * gridSize * pxPerMm} y1={0} x2={i * gridSize * pxPerMm} y2={lenPx} stroke="#4a453f" strokeWidth="0.5" opacity="0.4" />
             ))}
-            {snapEnabled && Array.from({ length: Math.floor(canvasLenMm / gridSize) }).map((_, i) => (
+            {gridLinesY.map((i) => (
               <line key={"gy" + i} x1={0} y1={i * gridSize * pxPerMm} x2={widthPx} y2={i * gridSize * pxPerMm} stroke="#4a453f" strokeWidth="0.5" opacity="0.4" />
             ))}
             {/* required-length marker */}
@@ -1135,8 +1493,7 @@ function CuttingCanvas({ rooms, roomsById, instances, setInstances, rollWidth, t
             {lengthTicks.map((m) => (
               <g key={"lm" + m}>
                 <line x1={-8} y1={m * 1000 * pxPerMm} x2={0} y2={m * 1000 * pxPerMm} stroke="#7a756c" strokeWidth="1" />
-                <text x={-32} y={m * 1000 * pxPerMm + 3} fontSize="9" fontFamily="monospace" fill="#7a756c">{m}m</text>
-              </g>
+                <text x={-32} y={m * 1000 * pxPerMm + 3} fontSize="9" fontFamily="monospace" fill="#7a756c">{m}m</text>              </g>
             ))}
 
             {instances.map((inst) => {
@@ -1184,7 +1541,7 @@ function CuttingCanvas({ rooms, roomsById, instances, setInstances, rollWidth, t
    SECTION: TOP BAR
    ====================================================================== */
 
-function TopBar({ projectName, setProjectName, stats, onUndo, onRedo, canUndo, canRedo, onAutoArrange, onSave, view, setView, onOpenCuttingPlan, instanceCount }) {
+function TopBar({ projectName, setProjectName, stats, onUndo, onRedo, canUndo, canRedo, onAutoArrange, arranging, onSave, view, setView, onOpenCuttingPlan, instanceCount }) {
   return (
     <div className="flex items-center gap-3 px-4 py-2.5 bg-[#242220] text-stone-200 border-b border-black/40 flex-wrap">
       <ScissorsLineDashed size={16} className="text-[#e0a527]" />
@@ -1204,7 +1561,7 @@ function TopBar({ projectName, setProjectName, stats, onUndo, onRedo, canUndo, c
       <div className="ml-auto flex items-center gap-1.5">
         <button onClick={onUndo} disabled={!canUndo} title="Undo" className="p-2 hover:bg-white/10 rounded-full disabled:opacity-30 transition-colors"><Undo2 size={15} /></button>
         <button onClick={onRedo} disabled={!canRedo} title="Redo" className="p-2 hover:bg-white/10 rounded-full disabled:opacity-30 transition-colors"><Redo2 size={15} /></button>
-        <button onClick={onAutoArrange} title="Automatically pack all placed rooms" className="flex items-center gap-1.5 text-sm font-medium bg-[#c98a3a] text-white px-4 py-2 rounded-xl hover:bg-[#b57a2f] shadow-sm transition-colors"><Grid3x3 size={14} /> Auto Arrange</button>
+        <button onClick={onAutoArrange} disabled={arranging} title="Search for an efficient layout using exact piece geometry" className="flex items-center gap-1.5 text-sm font-medium bg-[#c98a3a] text-white px-4 py-2 rounded-xl hover:bg-[#b57a2f] shadow-sm transition-colors disabled:opacity-60"><Grid3x3 size={14} className={arranging ? "animate-spin" : ""} /> {arranging ? "Optimising…" : "Auto Arrange"}</button>
 
         <button onClick={onOpenCuttingPlan} title="Open a clean, printable cutting plan" className="flex items-center gap-1.5 text-sm font-medium px-4 py-2 rounded-xl hover:bg-white/10 transition-colors"><Layers size={14} /> Cutting Plan</button>
         <button onClick={onSave} title="Project autosaves — click to save immediately" className="flex items-center gap-1.5 text-sm font-medium px-4 py-2 rounded-xl hover:bg-white/10 transition-colors"><Save size={14} /> Save</button>
@@ -1300,10 +1657,14 @@ function renderPlanCanvas({ instances, roomsById, rollWidth, reqLength, projectN
     const bb = boundingBox(verts);
     const cx = offX + ((bb.minX + bb.maxX) / 2) * pxPerMm;
     const cy = offY + ((bb.minY + bb.maxY) / 2) * pxPerMm;
-    ctx.fillStyle = "#333333";
-    ctx.font = "9px monospace";
+    const sizeLabel = `${formatLength(bb.maxX - bb.minX, "m")} × ${formatLength(bb.maxY - bb.minY, "m")}`;
     ctx.textAlign = "center";
-    ctx.fillText(room.name, cx, cy);
+    ctx.fillStyle = "#1c1a18";
+    ctx.font = "bold 9px monospace";
+    ctx.fillText(room.name, cx, cy - 5);
+    ctx.fillStyle = "#555048";
+    ctx.font = "8px monospace";
+    ctx.fillText(sizeLabel, cx, cy + 7);
     ctx.textAlign = "left";
   });
 
@@ -1431,8 +1792,7 @@ function CuttingPlanModal({ onClose, rooms, roomsById, instances, rollWidth, pro
             </button>
             <button
               onClick={exportAsImage}
-              disabled={exportState === "working"}
-              title="Download this cutting plan as a PNG image"
+              disabled={exportState === "working"}              title="Download this cutting plan as a PNG image"
               className="flex items-center gap-1.5 text-sm font-medium bg-[#3c7a6f] text-white px-4 py-2 rounded-xl hover:bg-[#336a60] shadow-sm disabled:opacity-50 transition-colors"
             >
               <Download size={14} /> {exportState === "working" ? "Preparing…" : "Save as Image"}
@@ -1469,10 +1829,14 @@ function CuttingPlanModal({ onClose, rooms, roomsById, instances, rollWidth, pro
                 const verts = instanceVertices(room, inst);
                 const pts = verts.map((v) => `${v.x * pxPerMm},${v.y * pxPerMm}`).join(" ");
                 const bb = boundingBox(verts);
+                const midX = ((bb.minX + bb.maxX) / 2) * pxPerMm, midY = ((bb.minY + bb.maxY) / 2) * pxPerMm;
                 return (
                   <g key={inst.id}>
                     <polygon points={pts} fill={room.color + "33"} stroke={room.color} strokeWidth="1.5" />
-                    <text x={((bb.minX + bb.maxX) / 2) * pxPerMm} y={((bb.minY + bb.maxY) / 2) * pxPerMm} fontSize="9" textAnchor="middle" fontFamily="monospace" fill="#333">{room.name}</text>
+                    <text x={midX} y={midY - 4} fontSize="9" fontWeight="bold" textAnchor="middle" fontFamily="monospace" fill="#1c1a18">{room.name}</text>
+                    <text x={midX} y={midY + 8} fontSize="8" textAnchor="middle" fontFamily="monospace" fill="#555048">
+                      {formatLength(bb.maxX - bb.minX, "m")} × {formatLength(bb.maxY - bb.minY, "m")}
+                    </text>
                   </g>
                 );
               })}
@@ -1521,6 +1885,8 @@ export default function App() {
   const [gridSize, setGridSize] = useState(25);
   const [snapEnabled, setSnapEnabled] = useState(true);
   const [allowOverlap, setAllowOverlap] = useState(false);
+  const [guillotineMode, setGuillotineMode] = useState(true);
+  const [arranging, setArranging] = useState(false);
   const [projectName, setProjectName] = useState("Untitled Project");
   const [view, setView] = useState("rooms");
   const [selectedId, setSelectedId] = useState(null);
@@ -1569,6 +1935,7 @@ export default function App() {
         setGridSize(data.gridSize || 25);
         setSnapEnabled(data.snapEnabled ?? true);
         setAllowOverlap(data.allowOverlap ?? false);
+        setGuillotineMode(data.guillotineMode ?? true);
         setProjectName(data.projectName || "Untitled Project");
         historyRef.current = { stack: [data.instances || []], index: 0 };
       } else {
@@ -1579,13 +1946,13 @@ export default function App() {
   }, []);
 
   function doSave() {
-    saveProject({ rooms, instances, rollWidth, unit, tolerance, grainMode, gridSize, snapEnabled, allowOverlap, projectName });
+    saveProject({ rooms, instances, rollWidth, unit, tolerance, grainMode, gridSize, snapEnabled, allowOverlap, guillotineMode, projectName });
   }
   useEffect(() => {
     if (!loaded) return;
     const t = setTimeout(doSave, 700);
     return () => clearTimeout(t);
-  }, [rooms, instances, rollWidth, unit, tolerance, grainMode, gridSize, snapEnabled, allowOverlap, projectName, loaded]); // eslint-disable-line
+  }, [rooms, instances, rollWidth, unit, tolerance, grainMode, gridSize, snapEnabled, allowOverlap, guillotineMode, projectName, loaded]); // eslint-disable-line
 
   function handleSaveRoom(roomData) {
     setRooms((prev) => {
@@ -1689,11 +2056,17 @@ export default function App() {
   }, [selectedId, view, modal, grainMode]); // eslint-disable-line
 
   function runAutoArrange() {
-    setInstances((prev) => {
-      const next = autoArrange(prev, roomsById, rollWidth, tolerance, grainMode);
-      commitHistory(next);
-      return next;
-    });
+    setArranging(true);
+    // Defer to the next tick so the "Optimising…" label actually paints
+    // before the (synchronous, time-budgeted) search runs.
+    setTimeout(() => {
+      setInstances((prev) => {
+        const next = autoArrange(prev, roomsById, rollWidth, tolerance, grainMode, guillotineMode);
+        commitHistory(next);
+        return next;
+      });
+      setArranging(false);
+    }, 10);
   }
 
   const reqLength = useMemo(() => requiredLength(instances, roomsById), [instances, roomsById]);
@@ -1718,8 +2091,7 @@ export default function App() {
       <TopBar
         projectName={projectName} setProjectName={setProjectName} stats={stats}
         onUndo={undo} onRedo={redo} canUndo={historyRef.current.index > 0} canRedo={historyRef.current.index < historyRef.current.stack.length - 1}
-        onAutoArrange={runAutoArrange} onSave={doSave} view={view} setView={setView} onOpenCuttingPlan={() => setShowCuttingPlan(true)}
-        instanceCount={instances.length}
+        onAutoArrange={runAutoArrange} arranging={arranging} onSave={doSave} view={view} setView={setView} onOpenCuttingPlan={() => setShowCuttingPlan(true)}        instanceCount={instances.length}
       />
       <div className="flex flex-1 min-h-0">
         <LeftSidebar
@@ -1730,6 +2102,7 @@ export default function App() {
           tolerance={tolerance} setTolerance={setTolerance} grainMode={grainMode} setGrainMode={setGrainMode}
           gridSize={gridSize} setGridSize={setGridSize} snapEnabled={snapEnabled} setSnapEnabled={setSnapEnabled}
           allowOverlap={allowOverlap} setAllowOverlap={setAllowOverlap}
+          guillotineMode={guillotineMode} setGuillotineMode={setGuillotineMode}
         />
         {view === "cutting" ? (
           <>
