@@ -1937,6 +1937,27 @@ function CuttingCanvas({ rooms, roomsById, instances, setInstances, rollWidth, t
   }
   useEffect(() => { fitToScreen(); }, []); // eslint-disable-line
 
+  // Ctrl/Cmd + scroll wheel (also how browsers report trackpad pinch
+  // gestures) zooms, mirroring the magnifying-glass buttons. A plain
+  // wheel is left alone so it still scrolls/pans the canvas normally —
+  // important since the roll can run far longer than the viewport.
+  // Needs a real (non-passive) listener rather than React's onWheel prop,
+  // since React attaches wheel handlers as passive by default and a
+  // passive listener can't preventDefault() the browser's own
+  // ctrl+wheel page-zoom.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    function onWheel(e) {
+      if (!(e.ctrlKey || e.metaKey)) return;
+      e.preventDefault();
+      const factor = Math.exp(-e.deltaY * 0.0015);
+      setPxPerMm((z) => Math.min(0.4, Math.max(0.02, z * factor)));
+    }
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, []);
+
   const widthPx = rollWidth * pxPerMm;
   const lenPx = canvasLenMm * pxPerMm;
   const metreTicks = [];
