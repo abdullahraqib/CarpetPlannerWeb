@@ -839,7 +839,7 @@ function compactLayout(instances, roomsById, rollWidth, tolerance) {
 // How easy a finished layout is to actually cut by hand, as a single
 // comparable number — higher is easier. This is only ever used as a
 // TIEBREAKER between layouts of equal required length (never to justify a
-// longer roll): three things make a layout easier to cut —
+// longer roll): four things make a layout easier to cut —
 //   1. Long, continuous shared edges between pieces (and against the roll's
 //      own edges) mean fewer, straighter cuts rather than lots of short
 //      jagged ones.
@@ -850,6 +850,14 @@ function compactLayout(instances, roomsById, rollWidth, tolerance) {
 //   3. Clean horizontal lines that run the full roll width with no piece
 //      straddling them: a real guillotine cut, usable even outside
 //      guillotine mode, and a big win for hand-cutting.
+//   4. Same-room duplicates having their edges LINE UP with each other even
+//      when they aren't touching (e.g. every stair tread's left edge
+//      falling on the same line) — one straight edge or ruler line then
+//      serves several pieces at once instead of each needing its own
+//      measurement. Since rotation is tracked per room (every instance of
+//      a room always shares one rotation — see runNfpSearch), duplicates
+//      of the same room are always the same size, so comparing their
+//      bounding-box edges directly is meaningful.
 function cuttabilityScore(instances, roomsById, rollWidth) {
   const tagged = [];
   for (const inst of instances) {
@@ -895,6 +903,25 @@ function cuttabilityScore(instances, roomsById, rollWidth) {
     if (y <= EPS) continue;
     const straddled = tagged.some((r) => r.y < y - EPS && r.y + r.h > y + EPS);
     if (!straddled) score += FULL_SPAN_BONUS;
+  }
+
+  // Edge alignment between same-room duplicates (point 4 above): reward
+  // each of the four bounding-box edges (left/right/top/bottom) that lines
+  // up between two instances of the same room, whether or not they touch.
+  const ALIGN_BONUS = 400;
+  const instBB = instances.map((inst) => {
+    const room = roomsById[inst.roomId];
+    return room ? { roomId: inst.roomId, bb: boundingBox(instanceVertices(room, inst)) } : null;
+  }).filter(Boolean);
+  for (let i = 0; i < instBB.length; i++) {
+    for (let j = i + 1; j < instBB.length; j++) {
+      const a = instBB[i], b = instBB[j];
+      if (a.roomId !== b.roomId) continue;
+      if (Math.abs(a.bb.minX - b.bb.minX) < EPS) score += ALIGN_BONUS;
+      if (Math.abs(a.bb.maxX - b.bb.maxX) < EPS) score += ALIGN_BONUS;
+      if (Math.abs(a.bb.minY - b.bb.minY) < EPS) score += ALIGN_BONUS;
+      if (Math.abs(a.bb.maxY - b.bb.maxY) < EPS) score += ALIGN_BONUS;
+    }
   }
 
   return score;
