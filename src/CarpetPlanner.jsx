@@ -564,7 +564,7 @@ function precomputeTetrisOrientations(room, allowedRotations) {
 // the NFP search below, and the same swap/rotate move set, tuned to this
 // placer's much lower per-evaluation cost (confirmed well under a second
 // even at 20+ pieces).
-function tetrisSearch(instanceList, roomsById, rollWidth, tolerance, grainMode) {
+function tetrisSearch(instanceList, roomsById, rollWidth, tolerance, grainMode, budgetScale = 1, randomSeed = false) {
   const allowedRotations = allowedRotationsFor(grainMode);
   const n = instanceList.length;
   if (n === 0) return null;
@@ -578,6 +578,13 @@ function tetrisSearch(instanceList, roomsById, rollWidth, tolerance, grainMode) 
     rotByRoom[id] = room ? bestDefaultRotation(room, rollWidth, allowedRotations) : allowedRotations[0];
   });
   let order = instanceList.map((inst) => ({ inst }));
+  if (randomSeed) {
+    // Multi-start trial: shuffle the starting order (see runNfpSearch).
+    for (let i = order.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [order[i], order[j]] = [order[j], order[i]];
+    }
+  }
 
   function evaluate(seq, rotations) {
     const withRot = seq.map((s) => ({ inst: s.inst, rotation: rotations[s.inst.roomId] || 0 }));
@@ -590,8 +597,8 @@ function tetrisSearch(instanceList, roomsById, rollWidth, tolerance, grainMode) 
   let bestPlacements = evald.placements, bestLen = evald.length, currentLen = evald.length;
   if (n <= 1) return bestPlacements ? { placements: bestPlacements, length: bestLen } : null;
 
-  const timeBudgetMs = Math.min(1200, 200 + n * 20);
-  const iterCap = 8000;
+  const timeBudgetMs = Math.min(1200, 200 + n * 20) * budgetScale;
+  const iterCap = Math.max(300, Math.floor(8000 * budgetScale));
   let T = Math.max((isFinite(currentLen) ? currentLen : 1000) * 0.08, 50);
   const cooling = 0.995;
   const startTime = Date.now();
@@ -627,7 +634,7 @@ function tetrisSearch(instanceList, roomsById, rollWidth, tolerance, grainMode) 
 // Simulated annealing over (placement order, per-piece rotation), each
 // candidate evaluated with the exact NFP + bottom-left-fill placer above.
 // Time-budgeted so it stays responsive regardless of instance count.
-function runNfpSearch(instanceList, roomsById, rollWidth, tolerance, grainMode, placer) {
+function runNfpSearch(instanceList, roomsById, rollWidth, tolerance, grainMode, placer, budgetScale = 1, randomSeed = false) {
   const allowedRotations = allowedRotationsFor(grainMode);
   const n = instanceList.length;
   if (n === 0) return [];
@@ -646,12 +653,23 @@ function runNfpSearch(instanceList, roomsById, rollWidth, tolerance, grainMode, 
   });
 
   let order = instanceList.map((inst) => ({ inst }));
-  // Decreasing-height start is a strong seed for bottom-left-fill.
-  order.sort((a, b) => {
-    const ra = boundingBox(rotatePolygon(roomsById[a.inst.roomId]?.vertices || [{ x: 0, y: 0 }], rotByRoom[a.inst.roomId] || 0));
-    const rb = boundingBox(rotatePolygon(roomsById[b.inst.roomId]?.vertices || [{ x: 0, y: 0 }], rotByRoom[b.inst.roomId] || 0));
-    return (rb.maxY - rb.minY) - (ra.maxY - ra.minY);
-  });
+  if (randomSeed) {
+    // Multi-start trial: begin from a shuffled order instead of the
+    // decreasing-height seed, so this trial's SA trajectory actually
+    // explores a different part of the search space rather than retracing
+    // the same strong-seed path with different random accepts.
+    for (let i = order.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [order[i], order[j]] = [order[j], order[i]];
+    }
+  } else {
+    // Decreasing-height start is a strong seed for bottom-left-fill.
+    order.sort((a, b) => {
+      const ra = boundingBox(rotatePolygon(roomsById[a.inst.roomId]?.vertices || [{ x: 0, y: 0 }], rotByRoom[a.inst.roomId] || 0));
+      const rb = boundingBox(rotatePolygon(roomsById[b.inst.roomId]?.vertices || [{ x: 0, y: 0 }], rotByRoom[b.inst.roomId] || 0));
+      return (rb.maxY - rb.minY) - (ra.maxY - ra.minY);
+    });
+  }
 
   function evaluate(seq, rotations) {
     const withRot = seq.map((s) => ({ inst: s.inst, rotation: rotations[s.inst.roomId] || 0 }));
@@ -676,8 +694,12 @@ function runNfpSearch(instanceList, roomsById, rollWidth, tolerance, grainMode, 
 
   // Budget scales down per-iteration cost as the instance count grows, so
   // a big project still finishes promptly rather than freezing the tab.
-  const timeBudgetMs = Math.min(2500, 400 + n * 40);
-  const iterCap = Math.max(150, Math.floor(30000 / n));
+  // budgetScale shrinks this further when called as one of several trials
+  // in a multi-start portfolio (see autoArrange), so running N trials
+  // costs a small, bounded multiple of one full-budget run rather than
+  // literally N times as long.
+  const timeBudgetMs = Math.min(2500, 400 + n * 40) * budgetScale;
+  const iterCap = Math.max(150, Math.floor((30000 / n) * budgetScale));
   let T = Math.max(currentLen * 0.04, 50);
   const cooling = 0.97;
   const startTime = Date.now();
@@ -814,26 +836,54 @@ function compactLayout(instances, roomsById, rollWidth, tolerance) {
   return current;
 }
 
-// Public entry point for Auto Arrange. In guillotine mode there's only one
+// One full attempt at a layout: in guillotine mode there's only one
 // sensible placer (the tetris packer doesn't produce guillotine-cuttable
 // layouts, and compaction's free sliding isn't guillotine-safe either, so
 // neither applies), so this just runs the NFP search with the guillotine
 // placer. Otherwise it runs BOTH the exact-NFP search and the tetris
 // search, keeps whichever is shorter — see the comment above tetrisPack
 // for why neither replaces the other — and finally compacts that result.
-function autoArrange(instanceList, roomsById, rollWidth, tolerance, grainMode, guillotine) {
+// budgetScale is forwarded to both inner searches so a multi-trial caller
+// (autoArrange, below) can shrink each individual trial's time budget.
+function autoArrangeOnce(instanceList, roomsById, rollWidth, tolerance, grainMode, guillotine, budgetScale, randomSeed) {
   if (guillotine) {
-    return runNfpSearch(instanceList, roomsById, rollWidth, tolerance, grainMode, guillotineArrangeWithOrder);
+    const result = runNfpSearch(instanceList, roomsById, rollWidth, tolerance, grainMode, guillotineArrangeWithOrder, budgetScale, randomSeed);
+    return compactLayout(result, roomsById, rollWidth, tolerance);
   }
-  const nfpResult = runNfpSearch(instanceList, roomsById, rollWidth, tolerance, grainMode, arrangeWithOrder);
+  const nfpResult = runNfpSearch(instanceList, roomsById, rollWidth, tolerance, grainMode, arrangeWithOrder, budgetScale, randomSeed);
   const nfpLen = requiredLength(nfpResult, roomsById);
 
-  const tetrisOutcome = tetrisSearch(instanceList, roomsById, rollWidth, tolerance, grainMode);
+  const tetrisOutcome = tetrisSearch(instanceList, roomsById, rollWidth, tolerance, grainMode, budgetScale, randomSeed);
   const best = (tetrisOutcome && tetrisOutcome.placements && tetrisOutcome.length < nfpLen - EPS)
     ? tetrisOutcome.placements
     : nfpResult;
 
   return compactLayout(best, roomsById, rollWidth, tolerance);
+}
+
+// Public entry point for Auto Arrange: a multi-start portfolio. A single
+// simulated-annealing run can land in a local optimum that a different
+// starting point would have skipped past entirely, so every press of
+// Auto Arrange runs AUTO_ARRANGE_TRIALS (10) independent full attempts —
+// the first from the strong decreasing-height seed, the rest each from
+// their own freshly-shuffled starting order (see randomSeed in
+// runNfpSearch/tetrisSearch) — and keeps whichever produced the shortest
+// required roll length. Each trial's own time budget is shrunk (see
+// TRIAL_BUDGET_SCALE) so the full portfolio costs a small, bounded
+// multiple of one full-budget run rather than literally 10x as long,
+// while every trial still gets a real SA search, not a token pass.
+const AUTO_ARRANGE_TRIALS = 10;
+const TRIAL_BUDGET_SCALE = 0.35;
+function autoArrange(instanceList, roomsById, rollWidth, tolerance, grainMode, guillotine) {
+  if (instanceList.length === 0) return [];
+  let best = null, bestLen = Infinity;
+  for (let trial = 0; trial < AUTO_ARRANGE_TRIALS; trial++) {
+    const randomSeed = trial > 0; // trial 0 keeps the proven strong seed
+    const result = autoArrangeOnce(instanceList, roomsById, rollWidth, tolerance, grainMode, guillotine, TRIAL_BUDGET_SCALE, randomSeed);
+    const len = requiredLength(result, roomsById);
+    if (len < bestLen - EPS) { best = result; bestLen = len; }
+  }
+  return best;
 }
 
 /* ======================================================================
