@@ -179,6 +179,25 @@ function isPlacementValid(room, instance, allInstances, roomsById, rollWidth, to
   return { valid: true };
 }
 
+// Whether ANY instance in a layout currently overlaps another or falls
+// outside the roll width (e.g. because a room's wall dimensions were
+// edited after it was already placed, so an instance that used to fit now
+// doesn't). requiredLength alone can't catch this: overlapping pieces
+// occupy the same space, so an invalid layout can measure the SAME or even
+// SHORTER than any valid rearrangement — a short length that can't
+// actually be cut isn't an efficient one. See runAutoArrange, which checks
+// this before ever comparing lengths.
+function layoutHasCollisions(instances, roomsById, rollWidth, tolerance) {
+  for (const inst of instances) {
+    const room = roomsById[inst.roomId];
+    if (!room) continue;
+    const instTolerance = inst.allowanceOverride != null && inst.allowanceOverride !== ""
+      ? parseFloat(inst.allowanceOverride) : tolerance;
+    if (!isPlacementValid(room, inst, instances, roomsById, rollWidth, instTolerance).valid) return true;
+  }
+  return false;
+}
+
 function requiredLength(instances, roomsById) {
   let maxY = 0;
   instances.forEach((inst) => {
@@ -2556,8 +2575,24 @@ export default function App() {
       setInstances((prev) => {
         if (prev.length === 0) return prev;
         const currentLen = requiredLength(prev, roomsById);
+        // A room's wall dimensions can be edited after instances of it are
+        // already placed — the instances keep their old x/y, so they can
+        // now overlap a neighbour or stick outside the roll that used to
+        // fit fine. requiredLength can't see this: overlapping pieces
+        // share the same space, so the invalid current layout can measure
+        // the same as, or even shorter than, any valid rearrangement. So
+        // validity is checked FIRST, before any length comparison — a
+        // short layout that can't actually be cut is never "efficient".
+        const currentInvalid = layoutHasCollisions(prev, roomsById, rollWidth, tolerance);
         const next = autoArrange(prev, roomsById, rollWidth, tolerance, grainMode, guillotineMode);
         const nextLen = requiredLength(next, roomsById);
+        if (currentInvalid) {
+          commitHistory(next);
+          setArrangeNote(nextLen < currentLen - EPS
+            ? "Fixed overlapping pieces and shortened the plan"
+            : "Fixed overlapping pieces");
+          return next;
+        }
         // Auto Arrange must never make the current plan worse: the search
         // explores many candidate layouts, but whatever's on the carpet
         // right now — including anything manually dragged into place — is
