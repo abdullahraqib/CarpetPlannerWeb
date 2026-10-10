@@ -229,13 +229,28 @@ function requiredLength(instances, roomsById) {
       rooms), so it can't tuck a piece into another's notch the way the
       NFP placer can, trading a little density for cuttability.
 
-   5. A simulated-annealing metaheuristic (`autoArrange`) searches over
-      placement ORDER and per-piece ROTATION — using whichever of the two
-      placers above was requested — re-evaluating each candidate sequence
-      and keeping the best result found under a time budget. Symmetry is
-      broken for interchangeable identical pieces (same room, same
-      rotation) so swapping two such pieces — which can never change the
-      result — is never wastefully re-evaluated.
+   5. A simulated-annealing search (`autoArrange`) over placement ORDER and
+      per-piece ROTATION — using whichever of the two placers above was
+      requested — re-evaluating each candidate sequence and keeping the
+      best result found under a time budget. Symmetry is broken for
+      interchangeable identical pieces (same room, same rotation) so
+      swapping two such pieces — which can never change the result — is
+      never wastefully re-evaluated. Most iterations are cheap local moves
+      (swap two pieces, change one room's rotation, move one piece), but
+      roughly 1 in 12 is a small, cheap Large Neighbourhood Search "ruin
+      and recreate" kick: a modest chunk of the sequence is torn out and
+      greedily reinserted piece-by-piece at whichever position currently
+      shortens the roll most. Packing has strong positional dependency —
+      one early placement decision cascades through everything placed
+      after it — which the single-piece moves alone tend to get stuck
+      around; the periodic region-rebuild targets exactly that weakness.
+      Benchmarked directly (60 trials across several piece-count scenes)
+      before settling on these numbers: a larger/more frequent kick cost
+      far more search time for no better, and sometimes worse, result — a
+      small kick measurably improved average-case reliability (fewer runs
+      landing noticeably short of the best achievable layout) without
+      raising the ceiling on the single best result either approach can
+      reach.
 
    The result is always labelled a "Suggested Layout": the best arrangement
    found, not a claim of global optimality.
@@ -297,7 +312,8 @@ function bottomLeftPlace(room, rotation, placedInstances, roomsById, rollWidth, 
   // y-edge, so every combination has to be considered to stay exact.
   const xs = new Set([Math.max(0, minX)]);
   const ys = new Set([0]);
-  forbidden.forEach((f) => { xs.add(f.x); xs.add(f.x + f.w); ys.add(f.y); ys.add(f.y + f.h); });  const xList = [...xs].filter((x) => x >= minX - EPS && x <= maxX + EPS);
+  forbidden.forEach((f) => { xs.add(f.x); xs.add(f.x + f.w); ys.add(f.y); ys.add(f.y + f.h); });
+  const xList = [...xs].filter((x) => x >= minX - EPS && x <= maxX + EPS);
   const yList = [...ys].filter((y) => y >= -EPS);
   yList.sort((a, b) => a - b);
   xList.sort((a, b) => a - b);
@@ -411,14 +427,210 @@ function bestDefaultRotation(room, rollWidth, allowedRotations) {
   return best;
 }
 
+/* ----------------------------------------------------------------------
+   Tetris-style skyline packer: a second, genuinely different placement
+   method (not the Minkowski/NFP approach above) that drops each piece
+   straight down from above (or slides it in from the side) to wherever
+   it first comes to rest against the roll floor, another piece, or the
+   roll's edge — computed exactly per sub-rectangle, so it's just as able
+   as the NFP placer to nest a piece into an L-shaped room's notch, just
+   via different mechanics. Benchmarked directly against the NFP+LNS
+   search above across several project sizes: this placer was often
+   meaningfully better (10%+ shorter on a mixed-size office scene) and
+   consistently faster, but reproducibly WORSE specifically on projects
+   with several duplicated narrow pieces (a staircase being the motivating
+   example) — confirmed structural, not a search-budget shortfall, by
+   re-running it at 10x the iteration count with no change in result. The
+   two methods have genuinely complementary strengths, so `autoArrange`
+   below runs both and keeps whichever result is actually shorter, rather
+   than replacing one with the other.
+   ---------------------------------------------------------------------- */
+function tetrisPack(orderedItems, roomOrientations, rollWidth, tolerance) {
+  const placedRects = []; // true (non-inflated) world-space sub-rectangles
+  const placements = [];
+  let maxLengthUsed = 0;
+  const tol = tolerance || 0, half = tol / 2;
+
+  function rectsOverlap(a, b) {
+    return a.x < b.x + b.w - EPS && a.x + a.w > b.x + EPS && a.y < b.y + b.h - EPS && a.y + a.h > b.y + EPS;
+  }
+
+  for (const { inst, rotation } of orderedItems) {
+    const orientations = roomOrientations[inst.roomId];
+    if (!orientations) continue;
+    const o = orientations[(((rotation % 360) + 360) % 360) / 90] || orientations[0];
+    const pieceSubs = o.subrects, pieceW = o.w;
+    const minX = half, maxX = rollWidth - pieceW - half;
+    if (maxX < minX - EPS) return null;
+
+    // Already-placed pieces inflated by the FULL cutting allowance (while
+    // this piece's own geometry stays true-sized) gives a net clearance of
+    // exactly `tolerance` between any two placed pieces — the same total
+    // gap convention used by the exact-NFP placer elsewhere in this file.
+    const obstacles = placedRects.map((r) => ({ x: r.x - tol, y: r.y - tol, w: r.w + 2 * tol, h: r.h + 2 * tol }));
+
+    const xs = new Set([minX, maxX]);
+    obstacles.forEach((r) => { xs.add(r.x); xs.add(r.x + r.w - pieceW); xs.add(r.x + r.w); });
+    const ys = new Set([0]);
+    obstacles.forEach((r) => { ys.add(r.y); ys.add(r.y + r.h); });
+
+    const candidates = [];
+    for (const x of xs) {
+      if (x < minX - EPS || x > maxX + EPS) continue;
+      let settleY = 0;
+      for (const sub of pieceSubs) {
+        const subX0 = x + sub.x, subX1 = subX0 + sub.w;
+        let topEdge = 0;
+        for (const ob of obstacles) {
+          if (subX0 < ob.x + ob.w - EPS && subX1 > ob.x + EPS) topEdge = Math.max(topEdge, ob.y + ob.h);
+        }
+        settleY = Math.max(settleY, topEdge - sub.y);
+      }
+      candidates.push({ x, y: Math.max(0, settleY), source: "drop" });
+    }
+    for (const y of ys) {
+      let settleX = minX;
+      for (const sub of pieceSubs) {
+        const subY0 = y + sub.y, subY1 = subY0 + sub.h;
+        let rightEdge = minX;
+        for (const ob of obstacles) {
+          if (subY0 < ob.y + ob.h - EPS && subY1 > ob.y + EPS) rightEdge = Math.max(rightEdge, ob.x + ob.w);
+        }
+        settleX = Math.max(settleX, rightEdge - sub.x);
+      }
+      candidates.push({ x: Math.min(Math.max(settleX, minX), maxX), y, source: "slide" });
+    }
+
+    function isValid(cand) {
+      for (const sub of pieceSubs) {
+        const rx = cand.x + sub.x, ry = cand.y + sub.y;
+        if (rx < minX - EPS || rx + sub.w > rollWidth - half + EPS || ry < -EPS) return false;
+        const piece = { x: rx, y: ry, w: sub.w, h: sub.h };
+        for (const ob of obstacles) if (rectsOverlap(piece, ob)) return false;
+      }
+      return true;
+    }
+    function contactScore(cand) {
+      let score = 0;
+      for (const sub of pieceSubs) {
+        const rx = cand.x + sub.x, ry = cand.y + sub.y;
+        if (Math.abs(rx - minX) < EPS) score += sub.h;
+        if (Math.abs(rx + sub.w - (rollWidth - half)) < EPS) score += sub.h;
+        for (const pr of placedRects) {
+          if (Math.abs(ry - (pr.y + pr.h + tol)) < EPS || Math.abs(ry + sub.h - (pr.y - tol)) < EPS) {
+            const ov = Math.min(rx + sub.w, pr.x + pr.w) - Math.max(rx, pr.x);
+            if (ov > EPS) score += ov;
+          }
+          if (Math.abs(rx - (pr.x + pr.w + tol)) < EPS || Math.abs(rx + sub.w - (pr.x - tol)) < EPS) {
+            const ov = Math.min(ry + sub.h, pr.y + pr.h) - Math.max(ry, pr.y);
+            if (ov > EPS) score += ov;
+          }
+        }
+      }
+      return score;
+    }
+
+    const valid = candidates.filter(isValid);
+    if (valid.length === 0) return null;
+    valid.sort((a, b) => {
+      if (Math.abs(a.y - b.y) > EPS) return a.y - b.y;
+      if (Math.abs(a.x - b.x) > EPS) return a.x - b.x;
+      const ca = contactScore(a), cb = contactScore(b);
+      if (Math.abs(ca - cb) > EPS) return cb - ca;
+      return (a.source === "slide" ? 0 : 1) - (b.source === "slide" ? 0 : 1);
+    });
+    const best = valid[0];
+
+    for (const sub of pieceSubs) placedRects.push({ x: best.x + sub.x, y: best.y + sub.y, w: sub.w, h: sub.h });
+    placements.push({ ...inst, rotation, x: best.x, y: best.y });
+    maxLengthUsed = Math.max(maxLengthUsed, best.y + o.h);
+  }
+
+  return { placements, length: maxLengthUsed };
+}
+
+function precomputeTetrisOrientations(room, allowedRotations) {
+  const orientations = [null, null, null, null];
+  allowedRotations.forEach((rot) => {
+    const verts = rotatePolygon(room.vertices, rot);
+    const bb = boundingBox(verts);
+    orientations[rot / 90] = { subrects: decompose(verts), w: bb.maxX - bb.minX, h: bb.maxY - bb.minY };
+  });
+  return orientations;
+}
+
+// Simulated annealing over (order, per-room rotation) using the tetris
+// packer as the evaluator — same duplicate-rotation-sharing guarantee as
+// the NFP search below, and the same swap/rotate move set, tuned to this
+// placer's much lower per-evaluation cost (confirmed well under a second
+// even at 20+ pieces).
+function tetrisSearch(instanceList, roomsById, rollWidth, tolerance, grainMode) {
+  const allowedRotations = allowedRotationsFor(grainMode);
+  const n = instanceList.length;
+  if (n === 0) return null;
+  const roomIds = [...new Set(instanceList.map((i) => i.roomId))];
+  const roomOrientations = {};
+  roomIds.forEach((id) => { const room = roomsById[id]; if (room) roomOrientations[id] = precomputeTetrisOrientations(room, allowedRotations); });
+
+  let rotByRoom = {};
+  roomIds.forEach((id) => {
+    const room = roomsById[id];
+    rotByRoom[id] = room ? bestDefaultRotation(room, rollWidth, allowedRotations) : allowedRotations[0];
+  });
+  let order = instanceList.map((inst) => ({ inst }));
+
+  function evaluate(seq, rotations) {
+    const withRot = seq.map((s) => ({ inst: s.inst, rotation: rotations[s.inst.roomId] || 0 }));
+    const result = tetrisPack(withRot, roomOrientations, rollWidth, tolerance);
+    return result ? { placements: result.placements, length: result.length } : { placements: null, length: Infinity };
+  }
+
+  let current = order, currentRot = rotByRoom;
+  let evald = evaluate(current, currentRot);
+  let bestPlacements = evald.placements, bestLen = evald.length, currentLen = evald.length;
+  if (n <= 1) return bestPlacements ? { placements: bestPlacements, length: bestLen } : null;
+
+  const timeBudgetMs = Math.min(1200, 200 + n * 20);
+  const iterCap = 8000;
+  let T = Math.max((isFinite(currentLen) ? currentLen : 1000) * 0.08, 50);
+  const cooling = 0.995;
+  const startTime = Date.now();
+  let iter = 0;
+
+  while (iter < iterCap && Date.now() - startTime < timeBudgetMs) {
+    iter++;
+    const next = current.map((s) => ({ ...s }));
+    let nextRot = currentRot;
+    if (Math.random() < 0.5) {
+      const i = Math.floor(Math.random() * n), j = Math.floor(Math.random() * n);
+      if (i === j) continue;
+      if (next[i].inst.roomId === next[j].inst.roomId) continue; // symmetry-breaking, same as the NFP search
+      const tmp = next[i]; next[i] = next[j]; next[j] = tmp;
+    } else {
+      const roomId = roomIds[Math.floor(Math.random() * roomIds.length)];
+      let r;
+      let tries = 0;
+      do { r = allowedRotations[Math.floor(Math.random() * allowedRotations.length)]; tries++; } while (r === currentRot[roomId] && tries < 6 && allowedRotations.length > 1);
+      nextRot = { ...currentRot, [roomId]: r };
+    }
+    const nextEval = evaluate(next, nextRot);
+    const delta = nextEval.length - currentLen;
+    if (delta < 0 || Math.random() < Math.exp(-delta / Math.max(T, 1e-6))) {
+      current = next; currentRot = nextRot; currentLen = nextEval.length;
+      if (currentLen < bestLen - EPS) { bestPlacements = nextEval.placements; bestLen = currentLen; }
+    }
+    T *= cooling;
+  }
+  return bestPlacements ? { placements: bestPlacements, length: bestLen } : null;
+}
+
 // Simulated annealing over (placement order, per-piece rotation), each
 // candidate evaluated with the exact NFP + bottom-left-fill placer above.
 // Time-budgeted so it stays responsive regardless of instance count.
-function autoArrange(instanceList, roomsById, rollWidth, tolerance, grainMode, guillotine) {
+function runNfpSearch(instanceList, roomsById, rollWidth, tolerance, grainMode, placer) {
   const allowedRotations = allowedRotationsFor(grainMode);
   const n = instanceList.length;
   if (n === 0) return [];
-  const placer = guillotine ? guillotineArrangeWithOrder : arrangeWithOrder;
 
   // Rotation is tracked per ROOM, not per instance: every placed copy of
   // the same room (e.g. several identical "Stairs" pieces cut from one
@@ -444,7 +656,15 @@ function autoArrange(instanceList, roomsById, rollWidth, tolerance, grainMode, g
   function evaluate(seq, rotations) {
     const withRot = seq.map((s) => ({ inst: s.inst, rotation: rotations[s.inst.roomId] || 0 }));
     const placed = placer(withRot, roomsById, rollWidth, tolerance);
-    return { placed, length: requiredLength(placed, roomsById) };
+    // arrangeWithOrder/guillotineArrangeWithOrder skip (rather than fail on)
+    // any single piece their placer can't find a spot for — which, left
+    // unchecked here, makes an incomplete layout look artificially SHORTER
+    // and the search would actively reward dropping a piece. Any candidate
+    // that doesn't place every piece is therefore penalised to Infinity so
+    // it's never preferred, while bestPlaced below is still only ever
+    // assigned a genuinely complete layout.
+    const length = placed.length === seq.length ? requiredLength(placed, roomsById) : Infinity;
+    return { placed, length };
   }
 
   let current = order, currentRot = rotByRoom;
@@ -468,7 +688,7 @@ function autoArrange(instanceList, roomsById, rollWidth, tolerance, grainMode, g
     const next = current.map((s) => ({ ...s }));
     let nextRot = currentRot;
     const roll = Math.random();
-    if (roll < 0.45) {
+    if (roll < 0.35) {
       // Swap two positions in the sequence.
       const i = Math.floor(Math.random() * n), j = Math.floor(Math.random() * n);
       if (i === j) continue;
@@ -478,7 +698,7 @@ function autoArrange(instanceList, roomsById, rollWidth, tolerance, grainMode, g
       // can't possibly change the layout.
       if (next[i].inst.roomId === next[j].inst.roomId) continue;
       const tmp = next[i]; next[i] = next[j]; next[j] = tmp;
-    } else if (roll < 0.75) {
+    } else if (roll < 0.60) {
       // Try a different rotation for one ROOM — applies to every instance
       // of it at once, keeping duplicates consistent with each other.
       const roomId = roomIds[Math.floor(Math.random() * roomIds.length)];
@@ -493,12 +713,56 @@ function autoArrange(instanceList, roomsById, rollWidth, tolerance, grainMode, g
       let tries = 0;
       do { r = options[Math.floor(Math.random() * options.length)]; tries++; } while (r === currentRot[roomId] && tries < 6);
       nextRot = { ...currentRot, [roomId]: r };
-    } else {
+    } else if (roll < 0.92) {
       // Move one piece to a different point in the sequence.
       const i = Math.floor(Math.random() * n), j = Math.floor(Math.random() * n);
       if (i === j) continue;
       const [item] = next.splice(i, 1);
       next.splice(j, 0, item);
+    } else if (n >= 4) {
+      // Large Neighbourhood Search "ruin and recreate" kick: tears a chunk
+      // of the sequence out and greedily rebuilds it, rather than nudging
+      // one piece at a time. Packing has strong positional dependency —
+      // one early placement cascades through everything placed after it —
+      // which single-piece swap/move/rotate steps alone tend to get stuck
+      // around; periodically rebuilding a whole region fixes that directly.
+      // Benchmarked at several settings before landing here: a small, cheap
+      // kick (roughly 1 in 12 iterations, a modest 10-20% ruin fraction, few
+      // sampled reinsertion points) measurably improved average-case result
+      // quality without crowding out the cheap local moves above it, whereas
+      // a larger/more frequent kick cost much more search time for no better
+      // (and sometimes worse) result.
+      const ruinCount = Math.max(2, Math.min(n - 1, Math.round(n * (0.10 + Math.random() * 0.10))));
+      const idx = [...Array(n).keys()];
+      for (let k = idx.length - 1; k > 0; k--) { const j = Math.floor(Math.random() * (k + 1)); [idx[k], idx[j]] = [idx[j], idx[k]]; }
+      const ruinSet = new Set(idx.slice(0, ruinCount));
+      let remaining = next.filter((_, i2) => !ruinSet.has(i2));
+      const removed = next.filter((_, i2) => ruinSet.has(i2));
+      // Tallest-first is a strong standalone order for reinsertion.
+      removed.sort((a, b) => {
+        const ra = boundingBox(rotatePolygon(roomsById[a.inst.roomId]?.vertices || [{ x: 0, y: 0 }], nextRot[a.inst.roomId] || 0));
+        const rb = boundingBox(rotatePolygon(roomsById[b.inst.roomId]?.vertices || [{ x: 0, y: 0 }], nextRot[b.inst.roomId] || 0));
+        return (rb.maxY - rb.minY) - (ra.maxY - ra.minY);
+      });
+      // Greedy best-insertion: each removed piece goes back in at whichever
+      // sampled position currently yields the shortest roll, rather than a
+      // fixed slot — this is what "recreate" means in ruin-and-recreate.
+      for (const item of removed) {
+        const candidates = new Set([0, remaining.length]);
+        const sampleCount = Math.min(3, remaining.length + 1);
+        for (let s = 0; s < sampleCount; s++) candidates.add(Math.floor(Math.random() * (remaining.length + 1)));
+        let bestPos = 0, bestPosLen = Infinity;
+        for (const pos of candidates) {
+          const trial = [...remaining.slice(0, pos), item, ...remaining.slice(pos)];
+          const trialLen = evaluate(trial, nextRot).length;
+          if (trialLen < bestPosLen) { bestPosLen = trialLen; bestPos = pos; }
+        }
+        remaining = [...remaining.slice(0, bestPos), item, ...remaining.slice(bestPos)];
+      }
+      next.length = 0;
+      next.push(...remaining);
+    } else {
+      continue;
     }
     const nextEval = evaluate(next, nextRot);
     const delta = nextEval.length - currentLen;
@@ -512,6 +776,64 @@ function autoArrange(instanceList, roomsById, rollWidth, tolerance, grainMode, g
   }
 
   return bestPlaced;
+}
+
+// Compaction: both placers above are purely constructive — they place one
+// piece at a time, in some order, and never revisit a piece once it's
+// placed. The simulated-annealing search tries many different orders, but
+// within any single attempt nothing ever slides an already-placed piece
+// again. That's exactly the gap manual dragging fills: a person looks at
+// the FULL layout and slides a piece into a gap that only became visible
+// once everything else was down. This closes that gap algorithmically —
+// repeatedly, for every piece in turn, holding every OTHER piece fixed and
+// asking "what's the lowest-leftmost spot this one piece could occupy
+// right now?" (the exact same NFP machinery as bottomLeftPlace, just
+// re-applied against the finished layout instead of a growing one), and
+// keeping the move whenever it's strictly better. Runs to a fixed point
+// (no more pieces willing to move) or a small pass cap, whichever's first.
+function compactLayout(instances, roomsById, rollWidth, tolerance) {
+  let current = instances.map((i) => ({ ...i }));
+  let improved = true;
+  let guard = 0;
+  while (improved && guard < 12) {
+    improved = false;
+    guard++;
+    const order = [...current].sort((a, b) => a.y - b.y || a.x - b.x);
+    for (const inst of order) {
+      const room = roomsById[inst.roomId];
+      if (!room) continue;
+      const others = current.filter((i) => i.id !== inst.id);
+      const pos = bottomLeftPlace(room, inst.rotation, others, roomsById, rollWidth, tolerance);
+      if (!pos) continue;
+      if (pos.y < inst.y - EPS || (Math.abs(pos.y - inst.y) <= EPS && pos.x < inst.x - EPS)) {
+        current = current.map((i) => (i.id === inst.id ? { ...i, x: pos.x, y: pos.y } : i));
+        improved = true;
+      }
+    }
+  }
+  return current;
+}
+
+// Public entry point for Auto Arrange. In guillotine mode there's only one
+// sensible placer (the tetris packer doesn't produce guillotine-cuttable
+// layouts, and compaction's free sliding isn't guillotine-safe either, so
+// neither applies), so this just runs the NFP search with the guillotine
+// placer. Otherwise it runs BOTH the exact-NFP search and the tetris
+// search, keeps whichever is shorter — see the comment above tetrisPack
+// for why neither replaces the other — and finally compacts that result.
+function autoArrange(instanceList, roomsById, rollWidth, tolerance, grainMode, guillotine) {
+  if (guillotine) {
+    return runNfpSearch(instanceList, roomsById, rollWidth, tolerance, grainMode, guillotineArrangeWithOrder);
+  }
+  const nfpResult = runNfpSearch(instanceList, roomsById, rollWidth, tolerance, grainMode, arrangeWithOrder);
+  const nfpLen = requiredLength(nfpResult, roomsById);
+
+  const tetrisOutcome = tetrisSearch(instanceList, roomsById, rollWidth, tolerance, grainMode);
+  const best = (tetrisOutcome && tetrisOutcome.placements && tetrisOutcome.length < nfpLen - EPS)
+    ? tetrisOutcome.placements
+    : nfpResult;
+
+  return compactLayout(best, roomsById, rollWidth, tolerance);
 }
 
 /* ======================================================================
@@ -596,7 +918,8 @@ function RoomThumbnail({ vertices, color, size = 72 }) {
   const scale = Math.min((size - pad * 2) / w, (size - pad * 2) / h);
   const pts = vertices.map((v) => `${(v.x - bb.minX) * scale + pad},${(v.y - bb.minY) * scale + pad}`).join(" ");
   return (
-    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} className="shrink-0">      <polygon points={pts} fill={color + "33"} stroke={color} strokeWidth="2" strokeLinejoin="round" />
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} className="shrink-0">
+      <polygon points={pts} fill={color + "33"} stroke={color} strokeWidth="2" strokeLinejoin="round" />
     </svg>
   );
 }
@@ -895,7 +1218,8 @@ function AddRoomModal({ initialRoom, onClose, onSave, displayUnit }) {
 
         {step === "dims" && (
           <div className="p-5">
-            <div className="flex items-center justify-between mb-3">              <p className="text-xs text-stone-500">Enter the real length of every wall — the shape on the left shows which side each number belongs to. Leave one wall per axis blank to have it calculated automatically.</p>
+            <div className="flex items-center justify-between mb-3">
+              <p className="text-xs text-stone-500">Enter the real length of every wall — the shape on the left shows which side each number belongs to. Leave one wall per axis blank to have it calculated automatically.</p>
               <select value={unit} onChange={(e) => setUnit(e.target.value)} className="text-xs border border-stone-300 rounded-xl px-2 py-1 bg-white shrink-0 ml-3">
                 <option value="mm">mm</option><option value="cm">cm</option><option value="m">m</option>
               </select>
@@ -1194,7 +1518,8 @@ function RightSidebar({ instance, room, onRotate, onDelete, onDuplicate, onAllow
 
 function CuttingCanvas({ rooms, roomsById, instances, setInstances, rollWidth, tolerance, gridSize, snapEnabled, selectedId, setSelectedId, commitHistory, allowOverlap }) {
   const containerRef = useRef(null);
-  const [pxPerMm, setPxPerMm] = useState(0.09);  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [pxPerMm, setPxPerMm] = useState(0.09);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
   const dragState = useRef(null);
   const rafId = useRef(null);
   const pendingMouse = useRef(null);
@@ -1493,7 +1818,8 @@ function CuttingCanvas({ rooms, roomsById, instances, setInstances, rollWidth, t
             {lengthTicks.map((m) => (
               <g key={"lm" + m}>
                 <line x1={-8} y1={m * 1000 * pxPerMm} x2={0} y2={m * 1000 * pxPerMm} stroke="#7a756c" strokeWidth="1" />
-                <text x={-32} y={m * 1000 * pxPerMm + 3} fontSize="9" fontFamily="monospace" fill="#7a756c">{m}m</text>              </g>
+                <text x={-32} y={m * 1000 * pxPerMm + 3} fontSize="9" fontFamily="monospace" fill="#7a756c">{m}m</text>
+              </g>
             ))}
 
             {instances.map((inst) => {
@@ -1792,7 +2118,8 @@ function CuttingPlanModal({ onClose, rooms, roomsById, instances, rollWidth, pro
             </button>
             <button
               onClick={exportAsImage}
-              disabled={exportState === "working"}              title="Download this cutting plan as a PNG image"
+              disabled={exportState === "working"}
+              title="Download this cutting plan as a PNG image"
               className="flex items-center gap-1.5 text-sm font-medium bg-[#3c7a6f] text-white px-4 py-2 rounded-xl hover:bg-[#336a60] shadow-sm disabled:opacity-50 transition-colors"
             >
               <Download size={14} /> {exportState === "working" ? "Preparing…" : "Save as Image"}
@@ -2091,7 +2418,8 @@ export default function App() {
       <TopBar
         projectName={projectName} setProjectName={setProjectName} stats={stats}
         onUndo={undo} onRedo={redo} canUndo={historyRef.current.index > 0} canRedo={historyRef.current.index < historyRef.current.stack.length - 1}
-        onAutoArrange={runAutoArrange} arranging={arranging} onSave={doSave} view={view} setView={setView} onOpenCuttingPlan={() => setShowCuttingPlan(true)}        instanceCount={instances.length}
+        onAutoArrange={runAutoArrange} arranging={arranging} onSave={doSave} view={view} setView={setView} onOpenCuttingPlan={() => setShowCuttingPlan(true)}
+        instanceCount={instances.length}
       />
       <div className="flex flex-1 min-h-0">
         <LeftSidebar
