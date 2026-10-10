@@ -2410,8 +2410,8 @@ export default function App() {
   const [grainMode, setGrainMode] = useState("90");
   const [gridSize, setGridSize] = useState(25);
   const [snapEnabled, setSnapEnabled] = useState(true);
-  const [allowOverlap, setAllowOverlap] = useState(false);
-  const [guillotineMode, setGuillotineMode] = useState(true);
+  const [allowOverlap, setAllowOverlap] = useState(true);
+  const [guillotineMode, setGuillotineMode] = useState(false);
   const [arranging, setArranging] = useState(false);
   const [arrangeNote, setArrangeNote] = useState(null);
   const [projectName, setProjectName] = useState("Untitled Project");
@@ -2461,8 +2461,8 @@ export default function App() {
         setGrainMode(data.grainMode || "90");
         setGridSize(data.gridSize || 25);
         setSnapEnabled(data.snapEnabled ?? true);
-        setAllowOverlap(data.allowOverlap ?? false);
-        setGuillotineMode(data.guillotineMode ?? true);
+        setAllowOverlap(data.allowOverlap ?? true);
+        setGuillotineMode(data.guillotineMode ?? false);
         setProjectName(data.projectName || "Untitled Project");
         historyRef.current = { stack: [data.instances || []], index: 0 };
       } else {
