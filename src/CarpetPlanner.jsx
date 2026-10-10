@@ -1487,6 +1487,26 @@ function LeftSidebar({ rooms, onAddRoom, onEditRoom, onDeleteRoom, onDuplicateRo
   const [tab, setTab] = useState("rooms");
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+
+  // The roll-width field keeps its own text buffer, separate from the
+  // committed rollWidth (mm) state. Committing on every keystroke used to
+  // mean a momentarily-empty field (e.g. while selecting the old value to
+  // retype it) parsed to 0, got clamped up to the 500mm minimum, and
+  // snapped the field to "0.5" mid-edit — so the next digit typed landed
+  // after that "0.5" instead of replacing it. Typing is now free-form and
+  // only parsed/clamped/committed on blur or Enter, like a normal number
+  // field; invalid or empty input just reverts the display to whatever
+  // rollWidth currently is, rather than forcing it to the minimum.
+  const [rollWidthText, setRollWidthText] = useState(String(rollWidth / 1000));
+  useEffect(() => { setRollWidthText(String(rollWidth / 1000)); }, [rollWidth]);
+  function commitRollWidth() {
+    const parsed = parseFloat(rollWidthText);
+    if (isFinite(parsed) && parsed > 0) {
+      setRollWidth(Math.max(500, Math.round(parsed * 1000)));
+    } else {
+      setRollWidthText(String(rollWidth / 1000));
+    }
+  }
   return (
     <div className="w-72 shrink-0 border-r border-stone-300 bg-[#efece3] flex flex-col h-full">
       <div className="flex border-b border-stone-300 text-xs font-medium uppercase tracking-wide">
@@ -1559,8 +1579,10 @@ function LeftSidebar({ rooms, onAddRoom, onEditRoom, onDeleteRoom, onDuplicateRo
           <Field label="Carpet roll width">
             <div className="flex items-center gap-2">
               <input
-                type="number" step="0.01" value={rollWidth / 1000}
-                onChange={(e) => setRollWidth(Math.max(500, Math.round((parseFloat(e.target.value) || 0) * 1000)))}
+                type="number" step="0.01" value={rollWidthText}
+                onChange={(e) => setRollWidthText(e.target.value)}
+                onBlur={commitRollWidth}
+                onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
                 className="flex-1 border border-stone-300 rounded-xl px-3 py-2 text-sm font-mono bg-white"
               />
               <span className="text-sm text-stone-500">m</span>
