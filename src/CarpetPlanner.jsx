@@ -1917,7 +1917,7 @@ function CuttingCanvas({ rooms, roomsById, instances, setInstances, rollWidth, t
    SECTION: TOP BAR
    ====================================================================== */
 
-function TopBar({ projectName, setProjectName, stats, onUndo, onRedo, canUndo, canRedo, onAutoArrange, arranging, onSave, view, setView, onOpenCuttingPlan, instanceCount }) {
+function TopBar({ projectName, setProjectName, stats, onUndo, onRedo, canUndo, canRedo, onAutoArrange, arranging, arrangeNote, onSave, view, setView, onOpenCuttingPlan, instanceCount }) {
   return (
     <div className="flex items-center gap-3 px-4 py-2.5 bg-[#242220] text-stone-200 border-b border-black/40 flex-wrap">
       <ScissorsLineDashed size={16} className="text-[#e0a527]" />
@@ -1937,7 +1937,14 @@ function TopBar({ projectName, setProjectName, stats, onUndo, onRedo, canUndo, c
       <div className="ml-auto flex items-center gap-1.5">
         <button onClick={onUndo} disabled={!canUndo} title="Undo" className="p-2 hover:bg-white/10 rounded-full disabled:opacity-30 transition-colors"><Undo2 size={15} /></button>
         <button onClick={onRedo} disabled={!canRedo} title="Redo" className="p-2 hover:bg-white/10 rounded-full disabled:opacity-30 transition-colors"><Redo2 size={15} /></button>
-        <button onClick={onAutoArrange} disabled={arranging} title="Search for an efficient layout using exact piece geometry" className="flex items-center gap-1.5 text-sm font-medium bg-[#c98a3a] text-white px-4 py-2 rounded-xl hover:bg-[#b57a2f] shadow-sm transition-colors disabled:opacity-60"><Grid3x3 size={14} className={arranging ? "animate-spin" : ""} /> {arranging ? "Optimising…" : "Auto Arrange"}</button>
+        <div className="relative">
+          <button onClick={onAutoArrange} disabled={arranging} title="Search for an efficient layout using exact piece geometry — only ever replaces the current plan with a shorter one" className="flex items-center gap-1.5 text-sm font-medium bg-[#c98a3a] text-white px-4 py-2 rounded-xl hover:bg-[#b57a2f] shadow-sm transition-colors disabled:opacity-60"><Grid3x3 size={14} className={arranging ? "animate-spin" : ""} /> {arranging ? "Optimising…" : "Auto Arrange"}</button>
+          {arrangeNote && (
+            <div className="absolute top-full right-0 mt-1.5 text-[11px] text-stone-300 bg-[#1c1a18] border border-white/10 rounded-lg px-2.5 py-1.5 whitespace-nowrap shadow-lg z-10">
+              {arrangeNote}
+            </div>
+          )}
+        </div>
 
         <button onClick={onOpenCuttingPlan} title="Open a clean, printable cutting plan" className="flex items-center gap-1.5 text-sm font-medium px-4 py-2 rounded-xl hover:bg-white/10 transition-colors"><Layers size={14} /> Cutting Plan</button>
         <button onClick={onSave} title="Project autosaves — click to save immediately" className="flex items-center gap-1.5 text-sm font-medium px-4 py-2 rounded-xl hover:bg-white/10 transition-colors"><Save size={14} /> Save</button>
@@ -2264,6 +2271,7 @@ export default function App() {
   const [allowOverlap, setAllowOverlap] = useState(false);
   const [guillotineMode, setGuillotineMode] = useState(true);
   const [arranging, setArranging] = useState(false);
+  const [arrangeNote, setArrangeNote] = useState(null);
   const [projectName, setProjectName] = useState("Untitled Project");
   const [view, setView] = useState("rooms");
   const [selectedId, setSelectedId] = useState(null);
@@ -2432,15 +2440,35 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [selectedId, view, modal, grainMode]); // eslint-disable-line
 
+  useEffect(() => {
+    if (!arrangeNote) return;
+    const t = setTimeout(() => setArrangeNote(null), 4000);
+    return () => clearTimeout(t);
+  }, [arrangeNote]);
+
   function runAutoArrange() {
     setArranging(true);
+    setArrangeNote(null);
     // Defer to the next tick so the "Optimising…" label actually paints
     // before the (synchronous, time-budgeted) search runs.
     setTimeout(() => {
       setInstances((prev) => {
+        if (prev.length === 0) return prev;
+        const currentLen = requiredLength(prev, roomsById);
         const next = autoArrange(prev, roomsById, rollWidth, tolerance, grainMode, guillotineMode);
-        commitHistory(next);
-        return next;
+        const nextLen = requiredLength(next, roomsById);
+        // Auto Arrange must never make the current plan worse: the search
+        // explores many candidate layouts, but whatever's on the carpet
+        // right now — including anything manually dragged into place — is
+        // only ever replaced by something that actually needs less roll.
+        // Equal-length alternatives are discarded too, since they'd only
+        // disturb manual work for no benefit.
+        if (nextLen < currentLen - EPS) {
+          commitHistory(next);
+          return next;
+        }
+        setArrangeNote("Already the shortest layout found — current plan kept");
+        return prev;
       });
       setArranging(false);
     }, 10);
@@ -2468,7 +2496,7 @@ export default function App() {
       <TopBar
         projectName={projectName} setProjectName={setProjectName} stats={stats}
         onUndo={undo} onRedo={redo} canUndo={historyRef.current.index > 0} canRedo={historyRef.current.index < historyRef.current.stack.length - 1}
-        onAutoArrange={runAutoArrange} arranging={arranging} onSave={doSave} view={view} setView={setView} onOpenCuttingPlan={() => setShowCuttingPlan(true)}
+        onAutoArrange={runAutoArrange} arranging={arranging} arrangeNote={arrangeNote} onSave={doSave} view={view} setView={setView} onOpenCuttingPlan={() => setShowCuttingPlan(true)}
         instanceCount={instances.length}
       />
       <div className="flex flex-1 min-h-0">
