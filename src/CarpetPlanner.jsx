@@ -836,6 +836,70 @@ function compactLayout(instances, roomsById, rollWidth, tolerance) {
   return current;
 }
 
+// How easy a finished layout is to actually cut by hand, as a single
+// comparable number — higher is easier. This is only ever used as a
+// TIEBREAKER between layouts of equal required length (never to justify a
+// longer roll): three things make a layout easier to cut —
+//   1. Long, continuous shared edges between pieces (and against the roll's
+//      own edges) mean fewer, straighter cuts rather than lots of short
+//      jagged ones.
+//   2. Multiple instances of the SAME room (e.g. several stair pieces cut
+//      from one duplicated entry) sitting adjacent to each other, so they
+//      can be cut as one block instead of hunted for across the roll —
+//      contact between same-room instances counts extra.
+//   3. Clean horizontal lines that run the full roll width with no piece
+//      straddling them: a real guillotine cut, usable even outside
+//      guillotine mode, and a big win for hand-cutting.
+function cuttabilityScore(instances, roomsById, rollWidth) {
+  const tagged = [];
+  for (const inst of instances) {
+    const room = roomsById[inst.roomId];
+    if (!room) continue;
+    const rects = decompose(instanceVertices(room, inst));
+    for (const r of rects) tagged.push({ ...r, roomId: inst.roomId, instId: inst.id });
+  }
+  if (tagged.length === 0) return 0;
+
+  const SAME_ROOM_BONUS = 2; // extra multiplier on contact between same-room instances
+  const BOUNDARY_WEIGHT = 0.5; // edges flush with the roll's own boundary need no cut at all
+  const FULL_SPAN_BONUS = 3000; // flat reward per clean full-width horizontal cut line
+  let score = 0;
+
+  for (let i = 0; i < tagged.length; i++) {
+    for (let j = i + 1; j < tagged.length; j++) {
+      const a = tagged[i], b = tagged[j];
+      if (a.instId === b.instId) continue; // sub-rects of one piece aren't a cut between pieces
+      const mult = a.roomId === b.roomId ? SAME_ROOM_BONUS : 1;
+      // shared vertical edge (a's right touches b's left, or vice versa)
+      if (Math.abs(a.x + a.w - b.x) < EPS || Math.abs(b.x + b.w - a.x) < EPS) {
+        const overlap = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
+        if (overlap > EPS) score += overlap * mult;
+      }
+      // shared horizontal edge (a's top touches b's bottom, or vice versa)
+      if (Math.abs(a.y + a.h - b.y) < EPS || Math.abs(b.y + b.h - a.y) < EPS) {
+        const overlap = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
+        if (overlap > EPS) score += overlap * mult;
+      }
+    }
+  }
+
+  for (const r of tagged) {
+    if (Math.abs(r.x) < EPS) score += BOUNDARY_WEIGHT * r.h;
+    if (Math.abs(r.x + r.w - rollWidth) < EPS) score += BOUNDARY_WEIGHT * r.h;
+    if (Math.abs(r.y) < EPS) score += BOUNDARY_WEIGHT * r.w;
+  }
+
+  const candidateYs = new Set();
+  for (const r of tagged) { candidateYs.add(r.y); candidateYs.add(r.y + r.h); }
+  for (const y of candidateYs) {
+    if (y <= EPS) continue;
+    const straddled = tagged.some((r) => r.y < y - EPS && r.y + r.h > y + EPS);
+    if (!straddled) score += FULL_SPAN_BONUS;
+  }
+
+  return score;
+}
+
 // One full attempt at a layout: in guillotine mode there's only one
 // sensible placer (the tetris packer doesn't produce guillotine-cuttable
 // layouts, and compaction's free sliding isn't guillotine-safe either, so
@@ -872,16 +936,26 @@ function autoArrangeOnce(instanceList, roomsById, rollWidth, tolerance, grainMod
 // TRIAL_BUDGET_SCALE) so the full portfolio costs a small, bounded
 // multiple of one full-budget run rather than literally 10x as long,
 // while every trial still gets a real SA search, not a token pass.
+//
+// Among trials that tie on length, the one that's easier to actually cut
+// (see cuttabilityScore) wins — shorter roll always comes first, but a
+// tie is never broken arbitrarily when one candidate has straighter,
+// more-continuous cut lines than another.
 const AUTO_ARRANGE_TRIALS = 10;
 const TRIAL_BUDGET_SCALE = 0.35;
 function autoArrange(instanceList, roomsById, rollWidth, tolerance, grainMode, guillotine) {
   if (instanceList.length === 0) return [];
-  let best = null, bestLen = Infinity;
+  let best = null, bestLen = Infinity, bestCut = -Infinity;
   for (let trial = 0; trial < AUTO_ARRANGE_TRIALS; trial++) {
     const randomSeed = trial > 0; // trial 0 keeps the proven strong seed
     const result = autoArrangeOnce(instanceList, roomsById, rollWidth, tolerance, grainMode, guillotine, TRIAL_BUDGET_SCALE, randomSeed);
     const len = requiredLength(result, roomsById);
-    if (len < bestLen - EPS) { best = result; bestLen = len; }
+    if (len < bestLen - EPS) {
+      best = result; bestLen = len; bestCut = cuttabilityScore(result, roomsById, rollWidth);
+    } else if (Math.abs(len - bestLen) <= EPS) {
+      const cut = cuttabilityScore(result, roomsById, rollWidth);
+      if (cut > bestCut + EPS) { best = result; bestLen = len; bestCut = cut; }
+    }
   }
   return best;
 }
@@ -2460,14 +2534,27 @@ export default function App() {
         // Auto Arrange must never make the current plan worse: the search
         // explores many candidate layouts, but whatever's on the carpet
         // right now — including anything manually dragged into place — is
-        // only ever replaced by something that actually needs less roll.
-        // Equal-length alternatives are discarded too, since they'd only
-        // disturb manual work for no benefit.
+        // only ever replaced by something that needs strictly less roll,
+        // OR needs exactly the same roll but is meaningfully easier to cut
+        // (straighter/longer shared edges, same-room pieces grouped into
+        // one block, more clean full-width cut lines — see
+        // cuttabilityScore). A same-length-but-not-actually-easier result
+        // is discarded, same as a longer one, so this never disturbs
+        // manual work for a wash.
         if (nextLen < currentLen - EPS) {
           commitHistory(next);
           return next;
         }
-        setArrangeNote("Already the shortest layout found — current plan kept");
+        if (Math.abs(nextLen - currentLen) <= EPS) {
+          const currentCut = cuttabilityScore(prev, roomsById, rollWidth);
+          const nextCut = cuttabilityScore(next, roomsById, rollWidth);
+          if (nextCut > currentCut + EPS) {
+            commitHistory(next);
+            setArrangeNote("Same length, easier to cut — plan updated");
+            return next;
+          }
+        }
+        setArrangeNote("Already the shortest (and easiest-to-cut) layout found — current plan kept");
         return prev;
       });
       setArranging(false);
