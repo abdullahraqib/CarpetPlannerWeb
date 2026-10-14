@@ -1093,7 +1093,7 @@ const SELECT = INPUT + " pr-8 appearance-none bg-no-repeat bg-[right_0.6rem_cent
 const BTN_VARIANTS = {
   primary: "bg-brand-600 text-white hover:bg-brand-700 shadow-sm",
   dark: "bg-ink-800 text-white hover:bg-ink-900 shadow-sm",
-  secondary: "bg-white text-stone-700 border border-stone-200 hover:bg-stone-50 hover:border-stone-300 shadow-sm",
+  secondary: "bg-white text-stone-800 ring-1 ring-stone-900/10 hover:ring-stone-900/20 hover:bg-stone-50 shadow-[0_1px_2px_rgba(60,40,30,0.06)]",
   ghost: "text-stone-600 hover:bg-stone-100 hover:text-stone-900",
   danger: "bg-red-600 text-white hover:bg-red-700 shadow-sm",
   dangerSoft: "text-red-600 bg-red-50 hover:bg-red-100",
@@ -1105,7 +1105,7 @@ function Button({ variant = "secondary", size = "md", className = "", children, 
     <button
       type="button"
       {...props}
-      className={cls("inline-flex items-center justify-center font-medium rounded-lg whitespace-nowrap transition-colors disabled:opacity-40 disabled:pointer-events-none", FOCUS_RING, BTN_VARIANTS[variant], BTN_SIZES[size], className)}
+      className={cls("inline-flex items-center justify-center font-medium rounded-lg whitespace-nowrap transition-[background-color,color,box-shadow,transform] duration-150 active:scale-[0.98] disabled:opacity-40 disabled:pointer-events-none", FOCUS_RING, BTN_VARIANTS[variant], BTN_SIZES[size], className)}
     >
       {children}
     </button>
@@ -1327,6 +1327,14 @@ const SHAPE_TEMPLATES = [
 
 const DIR_LABEL = { R: "right", L: "left", U: "up", D: "down" };
 
+function templateDirections(points) {
+  return points.map((a, i) => {
+    const b = points[(i + 1) % points.length];
+    if (Math.abs(b.x - a.x) > Math.abs(b.y - a.y)) return b.x > a.x ? "R" : "L";
+    return b.y > a.y ? "D" : "U";
+  });
+}
+
 // mm -> a plain number string in the given unit (used to pre-fill edit fields).
 function toUnitString(mm, unit) {
   if (mm == null || isNaN(mm)) return "";
@@ -1334,16 +1342,18 @@ function toUnitString(mm, unit) {
   return String(Math.round(v * 1000) / 1000);
 }
 
-function AddRoomModal({ initialRoom, onClose, onSave, displayUnit }) {
+function AddRoomModal({ initialRoom, initialTemplate, onClose, onSave, displayUnit }) {
   const initialUnit = displayUnit || "mm";
-  const [step, setStep] = useState(initialRoom ? "dims" : "draw");
-  const [points, setPoints] = useState([]);
-  const [directions, setDirections] = useState(initialRoom ? initialRoom.directions : []);
+  // A shape picked from the Rooms page skips the drawing step entirely.
+  const templateDirs = !initialRoom && initialTemplate ? templateDirections(initialTemplate.points) : null;
+  const [step, setStep] = useState(initialRoom || templateDirs ? "dims" : "draw");
+  const [points, setPoints] = useState(templateDirs ? initialTemplate.points : []);
+  const [directions, setDirections] = useState(initialRoom ? initialRoom.directions : templateDirs || []);
   const [drawError, setDrawError] = useState("");
   const [cursor, setCursor] = useState(null);
   // Stored wall lengths are millimetres; show them in the unit the fields use.
   const [lengths, setLengths] = useState(
-    initialRoom ? initialRoom.wallLengths.map((mm) => toUnitString(mm, initialUnit)) : []
+    initialRoom ? initialRoom.wallLengths.map((mm) => toUnitString(mm, initialUnit)) : templateDirs ? templateDirs.map(() => "") : []
   );
   const [unit, setUnit] = useState(initialUnit);
   const [activeWall, setActiveWall] = useState(null);
@@ -1875,145 +1885,169 @@ function RollSettings({ rollWidth, setRollWidth, unit, setUnit, tolerance, setTo
    SECTION: ROOMS VIEW — the room library
    ====================================================================== */
 
+// Warm-tinted elevation (matches the ivory page rather than flat grey).
+const CARD = "bg-white rounded-2xl ring-1 ring-stone-900/[0.06] shadow-[0_1px_2px_rgba(60,40,30,0.05),0_8px_24px_-12px_rgba(60,40,30,0.12)]";
+
 function PlacedBadge({ placed, quantity }) {
   const done = placed >= quantity;
   return (
-    <span className={cls("inline-flex items-center gap-1 text-xs font-medium rounded-full px-2 py-0.5 tabular-nums",
-      done ? "bg-emerald-50 text-emerald-700" : placed > 0 ? "bg-amber-50 text-amber-700" : "bg-stone-100 text-stone-600")}>
-      {done ? <CheckCircle2 size={11} /> : <CircleDashed size={11} />}
-      {placed}/{quantity} placed
+    <span className={cls("inline-flex items-center gap-1 text-xs font-medium tabular-nums",
+      done ? "text-emerald-700" : placed > 0 ? "text-amber-700" : "text-stone-500")}>
+      {done ? <CheckCircle2 size={13} /> : <CircleDashed size={13} />}
+      {placed} of {quantity} on the roll
     </span>
+  );
+}
+
+// The one big, unmistakable "add a room" control.
+function AddRoomButton({ onClick, size = "lg" }) {
+  const big = size === "lg";
+  return (
+    <button
+      type="button" onClick={onClick} aria-label="Add a room"
+      className={cls("group mx-auto grid place-items-center rounded-full bg-brand-600 text-white transition-all duration-200",
+        "shadow-[0_14px_32px_-12px_rgba(142,27,34,0.65)] hover:bg-brand-700 hover:shadow-[0_18px_36px_-12px_rgba(142,27,34,0.7)] hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.97]",
+        "focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-brand-500/30",
+        big ? "w-28 h-28" : "w-16 h-16")}
+    >
+      <Plus size={big ? 46 : 28} strokeWidth={2.25} className="transition-transform duration-200 group-hover:rotate-90" />
+    </button>
+  );
+}
+
+function ShapeShortcuts({ onPick }) {
+  return (
+    <div className="flex items-center justify-center gap-2.5">
+      {SHAPE_TEMPLATES.map((t) => (
+        <button
+          key={t.key} type="button" onClick={() => onPick(t)} title={`Start with a ${t.label.toLowerCase()} room`}
+          className={cls("flex items-center gap-2 h-11 pl-2 pr-3.5 rounded-xl bg-white ring-1 ring-stone-900/[0.08] text-sm font-medium text-stone-700",
+            "hover:ring-brand-500/50 hover:text-brand-700 active:scale-[0.98] transition-all", FOCUS_RING)}
+        >
+          <RoomThumbnail vertices={t.points} color="#b8282a" size={28} />
+          {t.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function EmptyRooms({ onAddRoom, onOpenHelp }) {
+  return (
+    <div className="flex-1 min-h-0 overflow-y-auto">
+      <div className="min-h-full grid place-items-center px-6 py-12">
+        <div className="text-center animate-fade-in">
+          <AddRoomButton onClick={() => onAddRoom()} />
+          <p className="mt-6 text-xl font-semibold text-stone-900">Add a room</p>
+          <p className="mt-1 text-sm text-stone-600 max-w-[30ch] mx-auto [text-wrap:balance]">Start with the first room you want to carpet.</p>
+
+          <div className="mt-10">
+            <p className="text-xs text-stone-500 mb-3">or start from a shape</p>
+            <ShapeShortcuts onPick={onAddRoom} />
+          </div>
+
+          <button type="button" onClick={onOpenHelp} className={cls("mt-10 inline-flex items-center gap-1.5 text-sm text-stone-600 underline decoration-stone-300 underline-offset-4 hover:text-stone-900 hover:decoration-stone-500 transition-colors", FOCUS_RING)}>
+            <HelpCircle size={15} /> How does this work?
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
 function RoomCard({ room, placed, unit, onEdit, onDuplicate, onDelete, onQuantityChange, onPlace }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   return (
-    <article className="group bg-white rounded-xl border border-stone-200 shadow-sm hover:shadow-md hover:border-stone-300 transition-all flex flex-col overflow-hidden">
-      <button type="button" onClick={onEdit} title="Edit this room" className={cls("relative h-36 bg-stone-50 border-b border-stone-100 grid place-items-center", FOCUS_RING)}>
-        <RoomThumbnail vertices={room.vertices} color={room.color} size={116} />
-        <span className="absolute top-2.5 right-2.5"><PlacedBadge placed={placed} quantity={room.quantity} /></span>
-        <span className="absolute bottom-2.5 right-2.5 opacity-0 group-hover:opacity-100 transition-opacity text-xs font-medium text-stone-600 bg-white border border-stone-200 rounded-md px-2 py-1 flex items-center gap-1 shadow-sm"><Pencil size={11} /> Edit</span>
+    <article className={cls(CARD, "group flex flex-col overflow-hidden transition-shadow hover:shadow-[0_1px_2px_rgba(60,40,30,0.06),0_14px_32px_-14px_rgba(60,40,30,0.22)]")}>
+      <button type="button" onClick={onEdit} title="Change this room" className={cls("relative h-40 bg-stone-50 grid place-items-center", FOCUS_RING)}>
+        <RoomThumbnail vertices={room.vertices} color={room.color} size={124} />
+        <span className="absolute bottom-3 right-3 opacity-0 group-hover:opacity-100 transition-opacity text-xs font-medium text-stone-700 bg-white/90 rounded-md px-2 py-1 flex items-center gap-1"><Pencil size={12} /> Change</span>
       </button>
-      <div className="p-4 flex-1 flex flex-col gap-3">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: room.color }} />
-            <h3 className="text-sm font-semibold text-stone-900 truncate">{room.name}</h3>
-          </div>
-          <p className="text-xs text-stone-600 tabular-nums mt-1">{formatLength(room.width, unit)} × {formatLength(room.length, unit)} · {formatArea(room.area)} · {room.corners} corners</p>
-          {room.notes && <p className="text-xs text-stone-500 mt-1 line-clamp-2">{room.notes}</p>}
-        </div>
-        <div className="flex items-center justify-between">
-          <span className="text-xs text-stone-600">Quantity</span>
+      <div className="px-5 pt-4 pb-5 flex-1 flex flex-col">
+        <h3 className="text-base font-semibold text-stone-900 truncate">{room.name}</h3>
+        <p className="text-sm text-stone-600 tabular-nums mt-0.5">{formatLength(room.width, unit)} × {formatLength(room.length, unit)} <span className="text-stone-400">·</span> {formatArea(room.area)}</p>
+        {room.notes && <p className="text-xs text-stone-500 mt-1.5 line-clamp-2">{room.notes}</p>}
+
+        <div className="flex items-center justify-between mt-4">
+          <span className="text-sm text-stone-700">How many</span>
           <QtyStepper value={room.quantity} onChange={(q) => onQuantityChange(room.id, q)} />
         </div>
-        <Button variant="secondary" className="w-full mt-auto" onClick={() => onPlace(room)} title="Add one copy to the cutting layout">
-          <Layers size={15} /> Place on carpet
-        </Button>
-      </div>
-      <div className="flex items-center gap-1 px-2 py-1.5 border-t border-stone-100 min-h-[44px]">
-        {confirmDelete ? (
-          <div className="flex items-center gap-2 w-full pl-2 text-xs animate-fade-in">
-            <span className="text-stone-700 flex-1 min-w-0 truncate">Delete this room{placed > 0 ? ` and its ${placed} piece${placed > 1 ? "s" : ""}` : ""}?</span>
-            <Button variant="ghost" size="sm" onClick={() => setConfirmDelete(false)}>Cancel</Button>
-            <Button variant="danger" size="sm" onClick={() => { onDelete(room.id); setConfirmDelete(false); }}>Delete</Button>
-          </div>
-        ) : (
-          <>
-            <Button variant="ghost" size="sm" onClick={onEdit}><Pencil size={13} /> Edit</Button>
-            <Button variant="ghost" size="sm" onClick={() => onDuplicate(room)}><Copy size={13} /> Duplicate</Button>
-            <Button variant="ghost" size="sm" className="ml-auto !text-red-600 hover:!bg-red-50" onClick={() => setConfirmDelete(true)}><Trash2 size={13} /> Delete</Button>
-          </>
-        )}
+        <div className="mt-2"><PlacedBadge placed={placed} quantity={room.quantity} /></div>
+
+        <div className="mt-auto pt-4">
+          {confirmDelete ? (
+            <div className="flex items-center gap-2 animate-fade-in">
+              <span className="text-sm text-stone-700 flex-1 min-w-0">Delete this room?</span>
+              <Button variant="ghost" size="sm" onClick={() => setConfirmDelete(false)}>Keep</Button>
+              <Button variant="danger" size="sm" onClick={() => { onDelete(room.id); setConfirmDelete(false); }}>Delete</Button>
+            </div>
+          ) : (
+            <div className="flex items-center gap-1">
+              <Button variant="secondary" size="sm" className="h-9" onClick={() => onPlace(room)} title="Put one of these on the carpet roll"><Layers size={14} /> Put on roll</Button>
+              <IconButton label="Make a copy" onClick={() => onDuplicate(room)} className="ml-auto"><Copy size={16} /></IconButton>
+              <IconButton label="Delete room" onClick={() => setConfirmDelete(true)} className="hover:!text-red-600 hover:!bg-red-50"><Trash2 size={16} /></IconButton>
+            </div>
+          )}
+        </div>
       </div>
     </article>
   );
 }
 
-function EmptyRooms({ onAddRoom, onOpenHelp }) {
-  const steps = [
-    { icon: Pencil, title: "Add your rooms", body: "Pick a rectangle or L-shape, or draw any shape corner by corner." },
-    { icon: Ruler, title: "Enter the measurements", body: "Type each wall's length — we'll work out the last one for you." },
-    { icon: Sparkles, title: "Lay out & cut", body: "Place rooms on the roll, press “Arrange for me”, then print or save the plan." },
-  ];
+function AddRoomTile({ onAddRoom }) {
   return (
-    <div className="bg-white border border-stone-200 rounded-2xl shadow-sm px-6 py-10 sm:px-10 text-center">
-      <div className="w-14 h-14 mx-auto rounded-2xl bg-brand-50 text-brand-500 grid place-items-center mb-4"><LayoutGrid size={26} /></div>
-      <h2 className="font-display text-2xl font-semibold uppercase tracking-wide text-stone-900">Let’s plan your carpet</h2>
-      <p className="text-sm text-stone-600 mt-1 max-w-md mx-auto">Find out how much carpet you need and exactly where to cut it — in three easy steps.</p>
-      <ol className="grid sm:grid-cols-3 gap-3 mt-7 text-left">
-        {steps.map((s, i) => (
-          <li key={s.title} className="rounded-xl bg-stone-50 border border-stone-100 p-4">
-            <div className="flex items-center gap-2 mb-1.5">
-              <span className="w-6 h-6 rounded-full bg-white border border-stone-200 grid place-items-center text-xs font-semibold text-stone-600">{i + 1}</span>
-              <s.icon size={14} className="text-brand-500" />
-            </div>
-            <p className="text-sm font-medium text-stone-900">{s.title}</p>
-            <p className="text-xs text-stone-600 mt-1 leading-relaxed">{s.body}</p>
-          </li>
-        ))}
-      </ol>
-      <div className="mt-7 flex flex-wrap items-center justify-center gap-3">
-        <Button variant="primary" size="lg" onClick={onAddRoom}><Plus size={18} /> Add your first room</Button>
-        <Button variant="secondary" size="lg" onClick={onOpenHelp}><HelpCircle size={18} /> Show me how</Button>
+    <div className="rounded-2xl bg-stone-100/70 min-h-[300px] flex flex-col items-center justify-center gap-4 px-5 py-8 text-center">
+      <AddRoomButton onClick={() => onAddRoom()} size="md" />
+      <div>
+        <p className="text-base font-semibold text-stone-900">Add a room</p>
+        <p className="text-sm text-stone-600 mt-0.5">Another room that needs carpet</p>
       </div>
     </div>
   );
 }
 
 function RoomsView({ projectName, setProjectName, onOpenHelp, rooms, placedByRoom, unit, onAddRoom, onEditRoom, onDeleteRoom, onDuplicateRoom, onQuantityChange, onPlaceOnCarpet, onPlaceAll, onGoToLayout, settings, totals }) {
+  if (rooms.length === 0) return <EmptyRooms onAddRoom={onAddRoom} onOpenHelp={onOpenHelp} />;
   const remaining = totals.needed - totals.placed;
+  const pct = totals.needed ? Math.min(100, (totals.placed / totals.needed) * 100) : 0;
   return (
-    <div className="flex-1 min-h-0 overflow-y-auto bg-stone-50">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 lg:py-8 grid lg:grid-cols-[minmax(0,1fr)_320px] gap-6 lg:gap-8">
+    <div className="flex-1 min-h-0 overflow-y-auto">
+      <div className="max-w-[1320px] mx-auto px-4 sm:px-8 pt-6 pb-16 grid lg:grid-cols-[minmax(0,1fr)_340px] gap-8 lg:gap-10">
         <section className="min-w-0">
-          <div className="flex flex-wrap items-end justify-between gap-3 mb-5">
-            <div className="min-w-0">
-              <ProjectNameField projectName={projectName} setProjectName={setProjectName} />
-              <h1 className="font-display text-3xl font-semibold uppercase tracking-wide text-stone-900 mt-1">Your rooms</h1>
-              <p className="text-sm text-stone-600 mt-1">Add every room that needs carpet, and how many of each.</p>
-            </div>
-            {rooms.length > 0 && <Button variant="primary" onClick={onAddRoom}><Plus size={16} /> Add room</Button>}
+          <div className="mb-5">
+            <ProjectNameField projectName={projectName} setProjectName={setProjectName} />
           </div>
-          {rooms.length === 0 ? (
-            <EmptyRooms onAddRoom={onAddRoom} onOpenHelp={onOpenHelp} />
-          ) : (
-            <div className="grid sm:grid-cols-2 xl:grid-cols-3 gap-4">
-              {rooms.map((room) => (
-                <RoomCard
-                  key={room.id} room={room} placed={placedByRoom[room.id] || 0} unit={unit}
-                  onEdit={() => onEditRoom(room)} onDuplicate={onDuplicateRoom} onDelete={onDeleteRoom}
-                  onQuantityChange={onQuantityChange} onPlace={onPlaceOnCarpet}
-                />
-              ))}
-              <button type="button" onClick={onAddRoom}
-                className={cls("min-h-[200px] rounded-xl border-2 border-dashed border-stone-200 text-stone-500 hover:text-brand-600 hover:border-brand-500 hover:bg-brand-50/50 transition-colors flex flex-col items-center justify-center gap-2", FOCUS_RING)}>
-                <Plus size={22} />
-                <span className="text-sm font-medium">Add another room</span>
-              </button>
-            </div>
-          )}
+          <div className="grid sm:grid-cols-2 xl:grid-cols-3 gap-5">
+            <AddRoomTile onAddRoom={onAddRoom} />
+            {rooms.map((room) => (
+              <RoomCard
+                key={room.id} room={room} placed={placedByRoom[room.id] || 0} unit={unit}
+                onEdit={() => onEditRoom(room)} onDuplicate={onDuplicateRoom} onDelete={onDeleteRoom}
+                onQuantityChange={onQuantityChange} onPlace={onPlaceOnCarpet}
+              />
+            ))}
+          </div>
         </section>
 
-        <aside className="space-y-4 lg:sticky lg:top-8 self-start">
-          {rooms.length > 0 && (
-            <Panel>
-              <p className="text-xs font-medium text-stone-600">Next step</p>
-              <p className="text-sm font-semibold text-stone-900 mt-0.5">Lay your rooms out on the roll</p>
-              <div className="mt-3 h-2 rounded-full bg-stone-100 overflow-hidden">
-                <div className="h-full bg-brand-500 rounded-full transition-all" style={{ width: `${totals.needed ? Math.min(100, (totals.placed / totals.needed) * 100) : 0}%` }} />
-              </div>
-              <p className="text-xs text-stone-600 mt-1.5 tabular-nums">{totals.placed} of {totals.needed} pieces on the carpet</p>
-              <div className="flex flex-col gap-2 mt-4">
-                {remaining > 0 && <Button variant="primary" className="w-full" onClick={onPlaceAll}><Layers size={15} /> Place all {remaining} remaining</Button>}
-                <Button variant={remaining > 0 ? "secondary" : "primary"} className="w-full" onClick={onGoToLayout}>Open cutting layout <ArrowRight size={15} /></Button>
-              </div>
-            </Panel>
-          )}
-          <Panel title="Carpet roll" icon={Ruler}>
+        <aside className="space-y-5 lg:sticky lg:top-6 self-start">
+          <section className="rounded-2xl bg-ink-900 text-white p-5">
+            <p className="font-display text-xs font-semibold uppercase tracking-[0.22em] text-stone-400">Next</p>
+            <p className="text-lg font-semibold mt-1">Plan the cut</p>
+            <div className="mt-4 h-1.5 rounded-full bg-white/10 overflow-hidden">
+              <div className="h-full bg-brand-500 rounded-full transition-all duration-500" style={{ width: `${pct}%` }} />
+            </div>
+            <p className="text-sm text-stone-300 mt-2 tabular-nums">{totals.placed} of {totals.needed} pieces on the roll</p>
+            <div className="flex flex-col gap-2 mt-5">
+              {remaining > 0 && <Button variant="primary" className="w-full h-11" onClick={onPlaceAll}>Put all {remaining} on the roll <ArrowRight size={16} /></Button>}
+              <Button variant="ghost" className={cls("w-full h-11 !text-white hover:!bg-white/10", remaining > 0 ? "" : "!bg-brand-600 hover:!bg-brand-700")} onClick={onGoToLayout}>
+                {remaining > 0 ? "Just open the plan" : <>Open the plan <ArrowRight size={16} /></>}
+              </Button>
+            </div>
+          </section>
+          <section className={cls(CARD, "p-5")}>
+            <h2 className="text-base font-semibold text-stone-900 mb-4">Carpet roll</h2>
             <RollSettings {...settings} />
-          </Panel>
+          </section>
         </aside>
       </div>
     </div>
@@ -2587,19 +2621,18 @@ function CuttingCanvas({ rooms, roomsById, instances, setInstances, rollWidth, t
         {/* Empty state */}
         {instances.length === 0 && (
           <div className="absolute inset-0 flex items-center justify-center pointer-events-none p-4">
-            <div className="pointer-events-auto text-center bg-white/95 backdrop-blur border border-stone-200 rounded-2xl shadow-lg px-7 py-6 max-w-sm">
-              <div className="w-11 h-11 mx-auto rounded-xl bg-brand-50 text-brand-500 grid place-items-center mb-3"><Layers size={20} /></div>
+            <div className="pointer-events-auto text-center bg-white/90 backdrop-blur-sm rounded-2xl ring-1 ring-stone-900/[0.06] shadow-[0_18px_40px_-18px_rgba(60,40,30,0.35)] px-8 py-7 max-w-sm">
               {rooms.length > 0 ? (
                 <>
-                  <p className="text-sm font-semibold text-stone-900">Your roll is empty</p>
-                  <p className="text-xs text-stone-600 mt-1 leading-relaxed">Drag rooms here from the list, or place them all at once and let “Arrange for me” pack them tightly.</p>
-                  <Button variant="primary" className="mt-4" onClick={onPlaceAll}><Layers size={15} /> Place all rooms</Button>
+                  <p className="text-lg font-semibold text-stone-900">The roll is empty</p>
+                  <p className="text-sm text-stone-600 mt-1 [text-wrap:balance]">Put all your rooms on it in one go, then press “Arrange for me”.</p>
+                  <Button variant="primary" className="mt-5 h-11 px-5" onClick={onPlaceAll}>Put all rooms on the roll <ArrowRight size={16} /></Button>
                 </>
               ) : (
                 <>
-                  <p className="text-sm font-semibold text-stone-900">No rooms to place yet</p>
-                  <p className="text-xs text-stone-600 mt-1 leading-relaxed">Add your rooms first, then come back here to lay them out on the roll.</p>
-                  <Button variant="primary" className="mt-4" onClick={onGoToRooms}><Plus size={15} /> Add rooms</Button>
+                  <p className="text-lg font-semibold text-stone-900">No rooms yet</p>
+                  <p className="text-sm text-stone-600 mt-1 [text-wrap:balance]">Add the rooms that need carpet first, then come back here.</p>
+                  <Button variant="primary" className="mt-5 h-11 px-5" onClick={onGoToRooms}><Plus size={16} /> Add a room</Button>
                 </>
               )}
             </div>
@@ -3424,7 +3457,8 @@ export default function App() {
 
   const selectedInstance = instances.find((i) => i.id === selectedId) || null;
   const selectedRoom = selectedInstance ? roomsById[selectedInstance.roomId] : null;
-  const openAddRoom = () => setModal({ mode: "add" });
+  // Called from buttons (which pass a click event) and from shape shortcuts (which pass a template).
+  const openAddRoom = (template) => setModal({ mode: "add", template: template && template.points ? template : null });
   const openEditRoom = (r) => setModal({ mode: "edit", room: r });
 
   if (!loaded) {
@@ -3484,6 +3518,7 @@ export default function App() {
       {modal && (
         <AddRoomModal
           initialRoom={modal.mode === "edit" ? modal.room : null}
+          initialTemplate={modal.template || null}
           onClose={() => setModal(null)}
           onSave={handleSaveRoom}
           displayUnit={unit}
