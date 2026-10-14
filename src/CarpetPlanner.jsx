@@ -1011,23 +1011,40 @@ function autoArrange(instanceList, roomsById, rollWidth, tolerance, grainMode, g
    SECTION: UNITS / FORMATTING
    ====================================================================== */
 
+const MM_PER_FOOT = 304.8, MM_PER_INCH = 25.4;
+
+// Accepts plain numbers (in defaultUnit) or tokens such as "3m 45cm",
+// "12ft 6in", "12' 6\"" or "150 inches". defaultUnit "ft" means feet.
 function parseLength(input, defaultUnit) {
   if (input == null || input === "") return null;
-  const str = String(input).trim().toLowerCase();
+  const str = String(input).trim().toLowerCase().replace(/[′’]/g, "'").replace(/[″”]/g, '"');
   if (/^[0-9.]+$/.test(str)) {
     const v = parseFloat(str);
     if (isNaN(v)) return null;
-    return defaultUnit === "m" ? v * 1000 : defaultUnit === "cm" ? v * 10 : v;
+    return defaultUnit === "m" ? v * 1000 : defaultUnit === "cm" ? v * 10 : defaultUnit === "ft" ? v * MM_PER_FOOT : v;
   }
-  const tokenRe = /([0-9]*\.?[0-9]+)\s*(mm|cm|m)/g;
+  const tokenRe = /([0-9]*\.?[0-9]+)\s*(mm|cm|m|feet|foot|ft|'|inches|inch|in|")/g;
   let match, total = 0, found = false;
   while ((match = tokenRe.exec(str)) !== null) {
     found = true;
     const v = parseFloat(match[1]);
     const unit = match[2];
-    total += unit === "m" ? v * 1000 : unit === "cm" ? v * 10 : v;
+    if (unit === "m") total += v * 1000;
+    else if (unit === "cm") total += v * 10;
+    else if (unit === "mm") total += v;
+    else if (unit === "feet" || unit === "foot" || unit === "ft" || unit === "'") total += v * MM_PER_FOOT;
+    else total += v * MM_PER_INCH;
   }
   return found ? total : null;
+}
+
+// 3048 -> 10′ 0″ (inches to the nearest half inch). Only used while entering sizes.
+function formatFtIn(mm) {
+  if (mm == null || isNaN(mm)) return "-";
+  let totalIn = Math.round((mm / MM_PER_INCH) * 2) / 2;
+  const ft = Math.floor(totalIn / 12);
+  const inch = Math.round((totalIn - ft * 12) * 2) / 2;
+  return `${ft}′ ${inch}″`;
 }
 
 function formatLength(mm, unit) {
@@ -1160,7 +1177,7 @@ function Segmented({ value, onChange, options, className = "" }) {
       {options.map((o) => (
         <button
           key={o.value} type="button" onClick={() => onChange(o.value)}
-          className={cls("flex-1 px-3 h-8 text-xs font-medium rounded-md transition-all", FOCUS_RING, value === o.value ? "bg-white text-stone-900 shadow-sm" : "text-stone-600 hover:text-stone-800")}
+          className={cls("flex-1 px-3 h-8 text-xs font-medium rounded-md whitespace-nowrap transition-all", FOCUS_RING, value === o.value ? "bg-white text-stone-900 shadow-sm" : "text-stone-600 hover:text-stone-800")}
         >
           {o.label}
         </button>
@@ -1302,7 +1319,7 @@ function WallShapePreview({ vertices, lengths, unit, activeWall, onPickWall }) {
             <circle cx={lx} cy={ly} r={active ? 11 : 9} fill={active ? "#d93732" : "white"} stroke={active ? "#d93732" : "#a8a29e"} strokeWidth="1.5" />
             <text x={lx} y={ly + 3.5} fontSize="10" fontWeight="600" textAnchor="middle" fill={active ? "white" : "#57534e"}>{i + 1}</text>
             {active && len != null && (
-              <text x={mx - dx * 14} y={my - dy * 14 + 4} fontSize="11" fontWeight="600" textAnchor="middle" fill="#8e1b22">{formatLength(len, unit)}</text>
+              <text x={mx - dx * 14} y={my - dy * 14 + 4} fontSize="11" fontWeight="600" textAnchor="middle" fill="#8e1b22">{unit === "ft" ? formatFtIn(len) : formatLength(len, unit)}</text>
             )}
           </g>
         );
@@ -1338,12 +1355,31 @@ function templateDirections(points) {
 // mm -> a plain number string in the given unit (used to pre-fill edit fields).
 function toUnitString(mm, unit) {
   if (mm == null || isNaN(mm)) return "";
+  if (unit === "ft") {
+    const totalIn = Math.round((mm / MM_PER_INCH) * 2) / 2;
+    const ft = Math.floor(totalIn / 12);
+    const inch = Math.round((totalIn - ft * 12) * 2) / 2;
+    return inch ? `${ft}ft ${inch}in` : `${ft}ft`;
+  }
   const v = unit === "m" ? mm / 1000 : unit === "cm" ? mm / 10 : mm;
   return String(Math.round(v * 1000) / 1000);
 }
 
-function AddRoomModal({ initialRoom, initialTemplate, onClose, onSave, displayUnit }) {
-  const initialUnit = displayUnit || "mm";
+function splitFtIn(text) {
+  const t = String(text || "").toLowerCase();
+  const ft = t.match(/([0-9]*\.?[0-9]+)\s*(ft|feet|foot|')/);
+  const inch = t.match(/([0-9]*\.?[0-9]+)\s*(in|inch|inches|")/);
+  if (!ft && !inch && /^[0-9.]+$/.test(t.trim())) return { ft: t.trim(), inch: "" };
+  return { ft: ft ? ft[1] : "", inch: inch ? inch[1] : "" };
+}
+function joinFtIn(ft, inch) {
+  const f = String(ft).trim(), i = String(inch).trim();
+  if (!f && !i) return "";
+  return [f && `${f}ft`, i && `${i}in`].filter(Boolean).join(" ");
+}
+
+function AddRoomModal({ initialRoom, initialTemplate, onClose, onSave, displayUnit, inputUnit }) {
+  const initialUnit = inputUnit || displayUnit || "mm";
   // A shape picked from the Rooms page skips the drawing step entirely.
   const templateDirs = !initialRoom && initialTemplate ? templateDirections(initialTemplate.points) : null;
   const [step, setStep] = useState(initialRoom || templateDirs ? "dims" : "draw");
@@ -1365,6 +1401,11 @@ function AddRoomModal({ initialRoom, initialTemplate, onClose, onSave, displayUn
   const [grain, setGrain] = useState(initialRoom?.grainDirection ?? false);
   const svgRef = useRef(null);
   const wallInputs = useRef([]);
+  const inchInputs = useRef([]);
+  const isFt = unit === "ft";
+  // While sizes are typed in feet & inches, show them that way too (with the
+  // metric equivalent alongside); everything after this wizard stays metric.
+  const showLen = (mm) => (isFt ? formatFtIn(mm) : formatLength(mm, unit));
 
   function snap(pt) { return { x: Math.round(pt.x / DRAW_SNAP) * DRAW_SNAP, y: Math.round(pt.y / DRAW_SNAP) * DRAW_SNAP }; }
 
@@ -1484,7 +1525,7 @@ function AddRoomModal({ initialRoom, initialTemplate, onClose, onSave, displayUn
     if (needed > 0) { resolvedLengths[idx] = needed; calcIndexes.add(idx); }
     else dimError = "The horizontal walls can't form a closed shape with these values — check the side-to-side measurements.";
   } else if (hBlanks.length === 0 && directions.some(isHorizontal) && Math.abs(hSum) > EPS) {
-    dimError = `The horizontal walls don't add up — they're off by ${formatLength(Math.abs(hSum), unit)}. Clear one and it'll be worked out for you.`;
+    dimError = `The horizontal walls don't add up — they're off by ${showLen(Math.abs(hSum))}. Clear one and it'll be worked out for you.`;
   } else if (hBlanks.length > 1) {
     dimError = `Fill in all but one horizontal wall (${hBlanks.length} still blank).`;
   }
@@ -1498,7 +1539,7 @@ function AddRoomModal({ initialRoom, initialTemplate, onClose, onSave, displayUn
       if (needed > 0) { resolvedLengths[idx] = needed; calcIndexes.add(idx); }
       else dimError = "The vertical walls can't form a closed shape with these values — check the top-to-bottom measurements.";
     } else if (vBlanks.length === 0 && directions.some((d) => !isHorizontal(d)) && Math.abs(vSum) > EPS) {
-      dimError = `The vertical walls don't add up — they're off by ${formatLength(Math.abs(vSum), unit)}. Clear one and it'll be worked out for you.`;
+      dimError = `The vertical walls don't add up — they're off by ${showLen(Math.abs(vSum))}. Clear one and it'll be worked out for you.`;
     } else if (vBlanks.length > 1) {
       dimError = `Fill in all but one vertical wall (${vBlanks.length} still blank).`;
     }
@@ -1533,12 +1574,13 @@ function AddRoomModal({ initialRoom, initialTemplate, onClose, onSave, displayUn
       cuttingAllowance: allowance === "" || !isFinite(allowanceCm) ? null : allowanceCm * 10,
       grainDirection: grain,
       color: initialRoom?.color || ROOM_COLORS[Math.floor(Math.random() * ROOM_COLORS.length)],
-    });
+    }, unit);
   }
 
-  function onWallKeyDown(e, i) {
+  function onWallKeyDown(e, i, part) {
     if (e.key !== "Enter") return;
     e.preventDefault();
+    if (isFt && part === "ft") { inchInputs.current[i]?.focus(); return; }
     const next = wallInputs.current[i + 1];
     if (next) next.focus();
     else if (canConstruct) setStep("details");
@@ -1659,10 +1701,12 @@ function AddRoomModal({ initialRoom, initialTemplate, onClose, onSave, displayUn
               <div className="min-w-0">
                 <div className="flex items-center justify-between gap-3 mb-1">
                   <p className="text-sm font-medium text-stone-800">Measure each wall</p>
-                  <Segmented value={unit} onChange={changeUnit} options={[{ value: "mm", label: "mm" }, { value: "cm", label: "cm" }, { value: "m", label: "m" }]} />
+                  <Segmented value={unit} onChange={changeUnit} options={[{ value: "m", label: "m" }, { value: "cm", label: "cm" }, { value: "mm", label: "mm" }, { value: "ft", label: "ft & in" }]} />
                 </div>
                 <p className="text-xs text-stone-600 mb-3.5 leading-relaxed">
-                  Tip: leave <b className="font-medium text-stone-700">one side-to-side</b> and <b className="font-medium text-stone-700">one top-to-bottom</b> wall blank and they'll be calculated for you. Mixed units like <code className="text-xs bg-stone-100 px-1 rounded">3m 45cm</code> work too.
+                  Tip: leave <b className="font-medium text-stone-700">one side-to-side</b> and <b className="font-medium text-stone-700">one top-to-bottom</b> wall blank and they'll be calculated for you. {isFt
+                    ? <>Sizes are converted to metres for the plan.</>
+                    : <>Mixed units like <code className="text-xs bg-stone-100 px-1 rounded">3m 45cm</code> work too.</>}
                 </p>
                 <div className="grid sm:grid-cols-2 gap-2">
                   {directions.map((d, i) => {
@@ -1677,21 +1721,53 @@ function AddRoomModal({ initialRoom, initialTemplate, onClose, onSave, displayUn
                       >
                         <span className={cls("w-6 h-6 rounded-full grid place-items-center text-xs font-semibold shrink-0", isActive ? "bg-brand-500 text-white" : "bg-stone-100 text-stone-600")}>{i + 1}</span>
                         <Icon size={14} className="text-stone-500 shrink-0" aria-label={`Wall goes ${DIR_LABEL[d]}`} />
-                        <input
-                          ref={(el) => (wallInputs.current[i] = el)}
-                          value={lengths[i] ?? ""}
-                          inputMode="decimal"
-                          aria-label={`Wall ${i + 1} length`}
-                          onChange={(e) => setLengths((ls) => ls.map((l, j) => (j === i ? e.target.value : l)))}
-                          onFocus={() => setActiveWall(i)}
-                          onBlur={() => setActiveWall((a) => (a === i ? null : a))}
-                          onKeyDown={(e) => onWallKeyDown(e, i)}
-                          placeholder={isCalc ? "auto" : (isHorizontal(d) ? "Width" : "Length")}
-                          className="flex-1 min-w-0 text-sm tabular-nums border-0 outline-none bg-transparent placeholder:text-stone-300"
-                        />
+                        {isFt ? (() => {
+                          const parts = splitFtIn(lengths[i]);
+                          const setPart = (key, v) => setLengths((ls) => ls.map((l, j) => {
+                            if (j !== i) return l;
+                            const p = splitFtIn(l);
+                            return joinFtIn(key === "ft" ? v : p.ft, key === "inch" ? v : p.inch);
+                          }));
+                          const box = "w-10 min-w-0 text-sm tabular-nums text-right border-0 outline-none bg-stone-50 rounded px-1.5 py-1 placeholder:text-stone-300 focus:bg-brand-50";
+                          return (
+                            <span className="flex-1 min-w-0 flex items-center gap-1">
+                              <input
+                                ref={(el) => (wallInputs.current[i] = el)}
+                                value={parts.ft} inputMode="decimal" aria-label={`Wall ${i + 1} feet`}
+                                onChange={(e) => setPart("ft", e.target.value.replace(/[^0-9.]/g, ""))}
+                                onFocus={() => setActiveWall(i)} onBlur={() => setActiveWall((a) => (a === i ? null : a))}
+                                onKeyDown={(e) => onWallKeyDown(e, i, "ft")}
+                                placeholder={isCalc ? "–" : "0"} className={box}
+                              />
+                              <span className="text-xs text-stone-500">ft</span>
+                              <input
+                                ref={(el) => (inchInputs.current[i] = el)}
+                                value={parts.inch} inputMode="decimal" aria-label={`Wall ${i + 1} inches`}
+                                onChange={(e) => setPart("inch", e.target.value.replace(/[^0-9.]/g, ""))}
+                                onFocus={() => setActiveWall(i)} onBlur={() => setActiveWall((a) => (a === i ? null : a))}
+                                onKeyDown={(e) => onWallKeyDown(e, i, "in")}
+                                placeholder={isCalc ? "–" : "0"} className={box + " ml-1"}
+                              />
+                              <span className="text-xs text-stone-500">in</span>
+                            </span>
+                          );
+                        })() : (
+                          <input
+                            ref={(el) => (wallInputs.current[i] = el)}
+                            value={lengths[i] ?? ""}
+                            inputMode="decimal"
+                            aria-label={`Wall ${i + 1} length`}
+                            onChange={(e) => setLengths((ls) => ls.map((l, j) => (j === i ? e.target.value : l)))}
+                            onFocus={() => setActiveWall(i)}
+                            onBlur={() => setActiveWall((a) => (a === i ? null : a))}
+                            onKeyDown={(e) => onWallKeyDown(e, i)}
+                            placeholder={isCalc ? "auto" : (isHorizontal(d) ? "Width" : "Length")}
+                            className="flex-1 min-w-0 text-sm tabular-nums border-0 outline-none bg-transparent placeholder:text-stone-300"
+                          />
+                        )}
                         {isCalc
-                          ? <span className="text-xs font-medium text-brand-700 bg-brand-50 rounded px-1.5 py-0.5 shrink-0 tabular-nums">= {formatLength(resolvedLengths[i], unit)}</span>
-                          : <span className="text-xs text-stone-500 shrink-0">{unit}</span>}
+                          ? <span className="text-xs font-medium text-brand-700 bg-brand-50 rounded px-1.5 py-0.5 shrink-0 tabular-nums">= {showLen(resolvedLengths[i])}</span>
+                          : !isFt && <span className="text-xs text-stone-500 shrink-0">{unit}</span>}
                       </label>
                     );
                   })}
@@ -1702,8 +1778,10 @@ function AddRoomModal({ initialRoom, initialTemplate, onClose, onSave, displayUn
                     <Notice tone={dimError.includes("still blank") ? "info" : "warn"}>{dimError}</Notice>
                   ) : canConstruct && previewBB ? (
                     <Notice tone="success">
-                      <span className="font-medium">Looks good!</span>{" "}
-                      {formatLength(previewBB.maxX - previewBB.minX, unit)} × {formatLength(previewBB.maxY - previewBB.minY, unit)} · {formatArea(previewArea)} · {previewVerts.length} corners
+                      <span className="font-medium">Looks good.</span>{" "}
+                      {formatLength(previewBB.maxX - previewBB.minX, "m")} × {formatLength(previewBB.maxY - previewBB.minY, "m")}
+                      {isFt && <> ({formatFtIn(previewBB.maxX - previewBB.minX)} × {formatFtIn(previewBB.maxY - previewBB.minY)})</>}
+                      {" "}· {formatArea(previewArea)} · {previewVerts.length} corners
                     </Notice>
                   ) : (
                     <Notice tone="info">{filledCount} of {directions.length} walls entered.</Notice>
@@ -2759,7 +2837,7 @@ function ProjectNameField({ projectName, setProjectName }) {
 function HelpModal({ onClose }) {
   const steps = [
     { icon: Plus, title: "Add each room", body: "On “Your rooms”, press Add room. Pick the shape that looks most like the room — a plain rectangle, an L-shape or a T-shape. If none fit, click on the grid to draw the corners yourself." },
-    { icon: Ruler, title: "Type in the measurements", body: "Type the length of each wall. The numbered picture shows which wall is which. You can leave one width and one length empty and the planner will work them out." },
+    { icon: Ruler, title: "Type in the measurements", body: "Type the length of each wall — in metres, or switch to “ft & in” to use feet and inches. The numbered picture shows which wall is which. You can leave one width and one length empty and the planner will work them out." },
     { icon: Layers, title: "Put the rooms on the roll", body: "Go to “Plan the cut” and press Place all rooms. Every room you need appears on the carpet roll." },
     { icon: Sparkles, title: "Press “Arrange for me”", body: "The planner fits the pieces together to use as little carpet as possible. You can also drag pieces around yourself, and click a piece to turn or remove it." },
     { icon: Printer, title: "Print or save the plan", body: "Press Print / save plan at the top to download a picture or PDF showing exactly where to cut, and how much carpet to buy." },
@@ -3153,6 +3231,7 @@ export default function App() {
   const [instances, setInstances] = useState([]);
   const [rollWidth, setRollWidth] = useState(4000);
   const [unit, setUnit] = useState("m");
+  const [inputUnit, setInputUnit] = useState(null); // unit last used to type room sizes (may be "ft")
   const [tolerance, setTolerance] = useState(0);
   const [grainMode, setGrainMode] = useState("90");
   const [gridSize, setGridSize] = useState(25);
@@ -3215,6 +3294,7 @@ export default function App() {
         setAllowOverlap(data.allowOverlap ?? true);
         setGuillotineMode(data.guillotineMode ?? false);
         setProjectName(data.projectName || "Untitled Project");
+        setInputUnit(data.inputUnit || null);
         historyRef.current = { stack: [data.instances || []], index: 0 };
         if ((data.instances || []).length > 0) setView("cutting");
       } else {
@@ -3226,7 +3306,7 @@ export default function App() {
 
   async function doSave() {
     setSaveState("saving");
-    await saveProject({ rooms, instances, rollWidth, unit, tolerance, grainMode, gridSize, snapEnabled, allowOverlap, guillotineMode, projectName });
+    await saveProject({ rooms, instances, rollWidth, unit, inputUnit, tolerance, grainMode, gridSize, snapEnabled, allowOverlap, guillotineMode, projectName });
     setSaveState("saved");
   }
   useEffect(() => {
@@ -3234,7 +3314,7 @@ export default function App() {
     setSaveState("saving");
     const t = setTimeout(doSave, 700);
     return () => clearTimeout(t);
-  }, [rooms, instances, rollWidth, unit, tolerance, grainMode, gridSize, snapEnabled, allowOverlap, guillotineMode, projectName, loaded]); // eslint-disable-line
+  }, [rooms, instances, rollWidth, unit, inputUnit, tolerance, grainMode, gridSize, snapEnabled, allowOverlap, guillotineMode, projectName, loaded]); // eslint-disable-line
 
   function handleManualSave() {
     doSave();
@@ -3261,7 +3341,8 @@ export default function App() {
     if (next !== instances) { setInstances(next); commitHistory(next); }
   }
 
-  function handleSaveRoom(roomData) {
+  function handleSaveRoom(roomData, usedUnit) {
+    if (usedUnit) setInputUnit(usedUnit);
     const isNew = !rooms.some((r) => r.id === roomData.id);
     setRooms((prev) => {
       const exists = prev.some((r) => r.id === roomData.id);
@@ -3556,7 +3637,7 @@ export default function App() {
           initialTemplate={modal.template || null}
           onClose={() => setModal(null)}
           onSave={handleSaveRoom}
-          displayUnit={unit}
+          displayUnit={unit} inputUnit={inputUnit}
         />
       )}
       {showCuttingPlan && (
