@@ -2800,7 +2800,25 @@ function downloadBlob(blob, filename) {
 // so PDF export (which needs toDataURL for the JPEG) would fail exactly
 // where PNG export (toBlob) might appear to work. Drawing natively avoids
 // that risk entirely, for both export paths.
-function renderPlanCanvas({ instances, roomsById, rollWidth, reqLength, projectName, pxPerMm, headerH, scale }) {
+// SR Carpets & Floors logo for the printed plan. Loaded once from this
+// site (same origin), so drawing it never taints the export canvas.
+const PLAN_LOGO_SRC = "/sr-logo-red.png";
+const PLAN_LOGO_H = 24; // px, in plan units
+const PLAN_HEADER_H = 66; // logo row + title + details line
+let planLogoPromise = null;
+function loadPlanLogo() {
+  if (!planLogoPromise) {
+    planLogoPromise = new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => { planLogoPromise = null; resolve(null); }; // export still works without it
+      img.src = PLAN_LOGO_SRC;
+    });
+  }
+  return planLogoPromise;
+}
+
+function renderPlanCanvas({ instances, roomsById, rollWidth, reqLength, projectName, pxPerMm, headerH, scale, logo }) {
   const svgW = rollWidth * pxPerMm + 20;
   const svgH = reqLength * pxPerMm + 20 + headerH;
   const canvas = document.createElement("canvas");
@@ -2811,16 +2829,20 @@ function renderPlanCanvas({ instances, roomsById, rollWidth, reqLength, projectN
   ctx.fillStyle = "#ffffff";
   ctx.fillRect(0, 0, svgW, svgH);
 
+  if (logo && logo.naturalHeight) {
+    ctx.drawImage(logo, 10, 8, (logo.naturalWidth / logo.naturalHeight) * PLAN_LOGO_H, PLAN_LOGO_H);
+  }
+
   ctx.textBaseline = "alphabetic";
   ctx.textAlign = "left";
   ctx.fillStyle = "#1c1a18";
   ctx.font = "bold 13px sans-serif";
-  ctx.fillText(`${projectName} — Cutting Plan`, 10, 18);
+  ctx.fillText(`${projectName} — Cutting Plan`, 10, 46);
   ctx.fillStyle = "#78716c";
   ctx.font = "9.5px monospace";
   ctx.fillText(
     `Roll ${(rollWidth / 1000).toFixed(2)}m wide \u00B7 Required length ${(reqLength / 1000).toFixed(2)}m \u00B7 ${instances.length} piece(s) \u00B7 ${new Date().toLocaleDateString()}`,
-    10, 32
+    10, 60
   );
 
   const offX = 10, offY = headerH + 10;
@@ -2929,7 +2951,8 @@ function CuttingPlanModal({ onClose, roomsById, instances, rollWidth, projectNam
   const svgRef = useRef(null);
   const [exportState, setExportState] = useState("idle"); // idle | working | error
   const [pdfState, setPdfState] = useState("idle"); // idle | working | error
-  const headerH = 40;
+  const headerH = PLAN_HEADER_H;
+  useEffect(() => { loadPlanLogo(); }, []);
   const svgW = rollWidth * pxPerMm + 20;
   const svgH = reqLength * pxPerMm + 20 + headerH;
   const empty = instances.length === 0;
@@ -2937,7 +2960,8 @@ function CuttingPlanModal({ onClose, roomsById, instances, rollWidth, projectNam
   async function exportAsImage() {
     setExportState("working");
     try {
-      const canvas = renderPlanCanvas({ instances, roomsById, rollWidth, reqLength, projectName, pxPerMm, headerH, scale: 2 });
+      const logo = await loadPlanLogo();
+      const canvas = renderPlanCanvas({ instances, roomsById, rollWidth, reqLength, projectName, pxPerMm, headerH, scale: 2, logo });
       canvas.toBlob((blob) => {
         if (!blob) { setExportState("error"); return; }
         downloadBlob(blob, `${safeFileName(projectName)}.png`);
@@ -2952,7 +2976,8 @@ function CuttingPlanModal({ onClose, roomsById, instances, rollWidth, projectNam
     setPdfState("working");
     try {
       const scale = 2;
-      const canvas = renderPlanCanvas({ instances, roomsById, rollWidth, reqLength, projectName, pxPerMm, headerH, scale });
+      const logo = await loadPlanLogo();
+      const canvas = renderPlanCanvas({ instances, roomsById, rollWidth, reqLength, projectName, pxPerMm, headerH, scale, logo });
       const jpegDataUrl = canvas.toDataURL("image/jpeg", 0.92);
       const jpegBytes = base64ToUint8Array(jpegDataUrl.split(",")[1]);
       const pdfBytes = buildSinglePageImagePDF(jpegBytes, canvas.width, canvas.height, svgW, svgH);
@@ -3015,8 +3040,9 @@ function CuttingPlanModal({ onClose, roomsById, instances, rollWidth, projectNam
               <div className="bg-white border border-stone-200 rounded-xl p-3 overflow-auto shadow-sm">
                 <svg ref={svgRef} width={svgW} height={svgH} viewBox={`0 0 ${svgW} ${svgH}`} style={{ maxWidth: "100%", height: "auto" }} className="block mx-auto">
                   <rect width={svgW} height={svgH} fill="#ffffff" />
-                  <text x={10} y={18} fontSize="13" fontWeight="bold" fontFamily="Inter, ui-sans-serif, system-ui, sans-serif" fill="#1c1a18">{projectName} — Cutting Plan</text>
-                  <text x={10} y={32} fontSize="9.5" fontFamily="ui-monospace, monospace" fill="#78716c">
+                  <image href={PLAN_LOGO_SRC} x={10} y={8} height={PLAN_LOGO_H} preserveAspectRatio="xMinYMid meet" width={Math.max(0, svgW - 20)} />
+                  <text x={10} y={46} fontSize="13" fontWeight="bold" fontFamily="Inter, ui-sans-serif, system-ui, sans-serif" fill="#1c1a18">{projectName} — Cutting Plan</text>
+                  <text x={10} y={60} fontSize="9.5" fontFamily="ui-monospace, monospace" fill="#78716c">
                     {`Roll ${(rollWidth / 1000).toFixed(2)}m wide · Required length ${(reqLength / 1000).toFixed(2)}m · ${instances.length} piece(s) · ${new Date().toLocaleDateString()}`}
                   </text>
                   <g transform={`translate(10,${headerH + 10})`}>
