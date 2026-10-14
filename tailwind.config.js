@@ -4,20 +4,35 @@ export default {
   theme: {
     extend: {
       fontFamily: {
-        sans: ["Inter", "ui-sans-serif", "system-ui", "-apple-system", "Segoe UI", "sans-serif"],
+        // SR Carpets & Floors brand faces (same as srcarpetsandfloors.co.uk)
+        sans: ["Barlow", "Helvetica Neue", "Arial", "sans-serif"],
+        display: ["Barlow Condensed", "Arial Narrow", "sans-serif"],
+      },
+      // One step larger than Tailwind's defaults so everything is easy to read.
+      fontSize: {
+        xs: ["13px", "18px"],
+        sm: ["15px", "22px"],
+        base: ["17px", "26px"],
+        lg: ["20px", "28px"],
+        xl: ["24px", "32px"],
       },
       colors: {
+        // SR red — 500 is the logo red, 600/700 are the deeper garnet used for buttons and text.
         brand: {
-          50: "#eef6f4",
-          100: "#d6ebe6",
-          500: "#3c7a6f",
-          600: "#336a60",
-          700: "#2a564e",
+          50: "#fdf3f2",
+          100: "#f9dedb",
+          500: "#d93732",
+          600: "#b8282a",
+          700: "#8e1b22",
         },
-        accent: {
-          50: "#fbf4ea",
-          500: "#c98a3a",
-          600: "#b0742a",
+        ink: {
+          800: "#1d1a19",
+          900: "#121010",
+        },
+        // Warm ivory instead of stark white/grey backgrounds — easier on the eyes.
+        stone: {
+          50: "#f7f3ed",
+          100: "#efe9e0",
         },
       },
       keyframes: {

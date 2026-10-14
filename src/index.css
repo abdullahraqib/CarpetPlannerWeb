@@ -12,10 +12,11 @@ body,
 
 body {
   overflow: hidden;
-  background: #fafaf9;
+  background: #f7f3ed;
+  color: #221e1c;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  font-feature-settings: "cv11", "ss01";
+  font-feature-settings: "tnum" 0;
 }
 
 @media (prefers-reduced-motion: reduce) {

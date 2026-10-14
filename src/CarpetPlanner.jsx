@@ -4,7 +4,7 @@ import {
   Maximize2, X, Check, AlertTriangle, Ruler, Layers, ScissorsLineDashed,
   ArrowRight, ArrowUp, ArrowLeft, ArrowDown, Settings2, Save,
   Pencil, ChevronLeft, ChevronRight, Undo, Info, Download, FileText, ChevronDown,
-  Sparkles, Loader2, MousePointerClick, LayoutGrid, CheckCircle2, CircleDashed,
+  Sparkles, Loader2, MousePointerClick, LayoutGrid, CheckCircle2, CircleDashed, HelpCircle, Printer,
 } from "lucide-react";
 
 /* ======================================================================
@@ -1040,7 +1040,7 @@ function formatLength(mm, unit) {
 function formatArea(mm2) { return (mm2 / 1_000_000).toFixed(2) + "m\u00B2"; }
 
 const DIR_ICON = { R: ArrowRight, L: ArrowLeft, U: ArrowUp, D: ArrowDown };
-const ROOM_COLORS = ["#c98a3a", "#3c7a6f", "#8a5fb0", "#4a7fb5", "#b5583f", "#5a8a4a", "#a3843f", "#7a5a8a"];
+const ROOM_COLORS = ["#c98a3a", "#d93732", "#8a5fb0", "#4a7fb5", "#b5583f", "#5a8a4a", "#a3843f", "#7a5a8a"];
 
 /* ======================================================================
    SECTION: PERSISTENCE
@@ -1087,12 +1087,12 @@ async function saveProject(data) {
 function cls(...c) { return c.filter(Boolean).join(" "); }
 
 const FOCUS_RING = "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40 focus-visible:ring-offset-1";
-const INPUT = "w-full h-10 rounded-lg border border-stone-200 bg-white px-3 text-sm text-stone-800 placeholder:text-stone-400 focus:outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20 transition";
+const INPUT = "w-full h-10 rounded-lg border border-stone-200 bg-white px-3 text-sm text-stone-800 placeholder:text-stone-500 focus:outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20 transition";
 const SELECT = INPUT + " pr-8 appearance-none bg-no-repeat bg-[right_0.6rem_center] bg-[length:14px] bg-[url('data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 24 24%22 fill=%22none%22 stroke=%22%2378716c%22 stroke-width=%222%22><path d=%22m6 9 6 6 6-6%22/></svg>')]";
 
 const BTN_VARIANTS = {
-  primary: "bg-brand-500 text-white hover:bg-brand-600 shadow-sm",
-  accent: "bg-accent-500 text-white hover:bg-accent-600 shadow-sm",
+  primary: "bg-brand-600 text-white hover:bg-brand-700 shadow-sm",
+  dark: "bg-ink-800 text-white hover:bg-ink-900 shadow-sm",
   secondary: "bg-white text-stone-700 border border-stone-200 hover:bg-stone-50 hover:border-stone-300 shadow-sm",
   ghost: "text-stone-600 hover:bg-stone-100 hover:text-stone-900",
   danger: "bg-red-600 text-white hover:bg-red-700 shadow-sm",
@@ -1131,7 +1131,7 @@ function Field({ label, hint, children }) {
     <label className="block">
       <span className="block text-xs font-medium text-stone-600 mb-1.5">{label}</span>
       {children}
-      {hint && <span className="block text-[11px] leading-snug text-stone-400 mt-1.5">{hint}</span>}
+      {hint && <span className="block text-xs leading-snug text-stone-500 mt-1.5">{hint}</span>}
     </label>
   );
 }
@@ -1148,7 +1148,7 @@ function Toggle({ checked, onChange, label, description }) {
       </button>
       <div className="min-w-0 cursor-pointer" onClick={() => onChange(!checked)}>
         <span className="block text-sm text-stone-800 leading-snug">{label}</span>
-        {description && <span className="block text-xs text-stone-500 mt-1 leading-snug">{description}</span>}
+        {description && <span className="block text-xs text-stone-600 mt-1 leading-snug">{description}</span>}
       </div>
     </div>
   );
@@ -1160,7 +1160,7 @@ function Segmented({ value, onChange, options, className = "" }) {
       {options.map((o) => (
         <button
           key={o.value} type="button" onClick={() => onChange(o.value)}
-          className={cls("flex-1 px-3 h-8 text-xs font-medium rounded-md transition-all", FOCUS_RING, value === o.value ? "bg-white text-stone-900 shadow-sm" : "text-stone-500 hover:text-stone-800")}
+          className={cls("flex-1 px-3 h-8 text-xs font-medium rounded-md transition-all", FOCUS_RING, value === o.value ? "bg-white text-stone-900 shadow-sm" : "text-stone-600 hover:text-stone-800")}
         >
           {o.label}
         </button>
@@ -1172,13 +1172,13 @@ function Segmented({ value, onChange, options, className = "" }) {
 function QtyStepper({ value, onChange }) {
   return (
     <div className="inline-flex items-center h-8 rounded-lg border border-stone-200 bg-white overflow-hidden">
-      <button type="button" onClick={() => onChange(Math.max(1, value - 1))} aria-label="Decrease quantity" title="Decrease quantity" className="w-8 h-full text-stone-500 hover:bg-stone-100 hover:text-stone-900 transition-colors">−</button>
+      <button type="button" onClick={() => onChange(Math.max(1, value - 1))} aria-label="Decrease quantity" title="Decrease quantity" className="w-8 h-full text-stone-600 hover:bg-stone-100 hover:text-stone-900 transition-colors">−</button>
       <input
         type="number" min="1" value={value} aria-label="Quantity"
         onChange={(e) => onChange(Math.max(1, parseInt(e.target.value) || 1))}
         className="w-10 h-full text-center text-sm font-medium tabular-nums border-x border-stone-200 focus:outline-none focus:bg-brand-50 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
       />
-      <button type="button" onClick={() => onChange(value + 1)} aria-label="Increase quantity" title="Increase quantity" className="w-8 h-full text-stone-500 hover:bg-stone-100 hover:text-stone-900 transition-colors">+</button>
+      <button type="button" onClick={() => onChange(value + 1)} aria-label="Increase quantity" title="Increase quantity" className="w-8 h-full text-stone-600 hover:bg-stone-100 hover:text-stone-900 transition-colors">+</button>
     </div>
   );
 }
@@ -1188,7 +1188,7 @@ function Panel({ title, icon: Icon, action, children, className = "" }) {
     <section className={cls("bg-white rounded-xl border border-stone-200 shadow-sm", className)}>
       {title && (
         <header className="flex items-center gap-2 px-4 pt-4 pb-3">
-          {Icon && <Icon size={15} className="text-stone-400" />}
+          {Icon && <Icon size={15} className="text-stone-500" />}
           <h2 className="text-sm font-semibold text-stone-900">{title}</h2>
           {action && <div className="ml-auto">{action}</div>}
         </header>
@@ -1212,10 +1212,6 @@ function Notice({ tone = "info", children }) {
       <div className="min-w-0">{children}</div>
     </div>
   );
-}
-
-function Kbd({ children }) {
-  return <kbd className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[10px] font-medium font-sans text-stone-600 bg-white border border-stone-200 border-b-2 rounded">{children}</kbd>;
 }
 
 // Modal shell: dimmed backdrop, centred card, Escape to close (when allowed).
@@ -1247,7 +1243,7 @@ function Toast({ toast, onDismiss }) {
       <div key={toast.id} role="status" className="pointer-events-auto flex items-center gap-3 bg-stone-900 text-stone-100 text-sm rounded-xl shadow-xl pl-4 pr-2 py-2.5 animate-toast-in">
         <Icon size={16} className={cls("shrink-0", iconColor)} />
         <span className="flex-1 leading-snug">{toast.message}</span>
-        <button onClick={onDismiss} aria-label="Dismiss" className="p-1.5 rounded-md text-stone-400 hover:text-white hover:bg-white/10"><X size={14} /></button>
+        <button onClick={onDismiss} aria-label="Dismiss" className="p-1.5 rounded-md text-stone-500 hover:text-white hover:bg-white/10"><X size={14} /></button>
       </div>
     </div>
   );
@@ -1284,12 +1280,12 @@ function WallShapePreview({ vertices, lengths, unit, activeWall, onPickWall }) {
   const pointsStr = pts.map((p) => `${p.x},${p.y}`).join(" ");
   return (
     <svg viewBox={`0 0 ${boxW} ${boxH}`} className="w-full h-auto bg-stone-50 border border-stone-200 rounded-xl" role="img" aria-label="Room shape with numbered walls">
-      <polygon points={pointsStr} fill="#3c7a6f14" stroke="#a8a29e" strokeWidth="2" strokeLinejoin="round" />
+      <polygon points={pointsStr} fill="#d9373214" stroke="#a8a29e" strokeWidth="2" strokeLinejoin="round" />
       {activeWall != null && pts[activeWall] && (
         <line
           x1={pts[activeWall].x} y1={pts[activeWall].y}
           x2={pts[(activeWall + 1) % pts.length].x} y2={pts[(activeWall + 1) % pts.length].y}
-          stroke="#3c7a6f" strokeWidth="5" strokeLinecap="round"
+          stroke="#d93732" strokeWidth="5" strokeLinecap="round"
         />
       )}
       {pts.map((p, i) => {
@@ -1303,10 +1299,10 @@ function WallShapePreview({ vertices, lengths, unit, activeWall, onPickWall }) {
         const len = lengths ? parseLength(lengths[i], unit) : null;
         return (
           <g key={i} onClick={() => onPickWall && onPickWall(i)} style={{ cursor: onPickWall ? "pointer" : "default" }}>
-            <circle cx={lx} cy={ly} r={active ? 11 : 9} fill={active ? "#3c7a6f" : "white"} stroke={active ? "#3c7a6f" : "#a8a29e"} strokeWidth="1.5" />
+            <circle cx={lx} cy={ly} r={active ? 11 : 9} fill={active ? "#d93732" : "white"} stroke={active ? "#d93732" : "#a8a29e"} strokeWidth="1.5" />
             <text x={lx} y={ly + 3.5} fontSize="10" fontWeight="600" textAnchor="middle" fill={active ? "white" : "#57534e"}>{i + 1}</text>
             {active && len != null && (
-              <text x={mx - dx * 14} y={my - dy * 14 + 4} fontSize="11" fontWeight="600" textAnchor="middle" fill="#2a564e">{formatLength(len, unit)}</text>
+              <text x={mx - dx * 14} y={my - dy * 14 + 4} fontSize="11" fontWeight="600" textAnchor="middle" fill="#8e1b22">{formatLength(len, unit)}</text>
             )}
           </g>
         );
@@ -1558,11 +1554,11 @@ function AddRoomModal({ initialRoom, onClose, onSave, displayUnit }) {
               const active = i === stepIndex, done = i < stepIndex;
               return (
                 <li key={key} className="flex items-center gap-2">
-                  <span className={cls("w-6 h-6 rounded-full grid place-items-center text-[11px] font-semibold transition-colors",
-                    active ? "bg-brand-500 text-white" : done ? "bg-brand-100 text-brand-700" : "bg-stone-100 text-stone-400")}>
+                  <span className={cls("w-6 h-6 rounded-full grid place-items-center text-xs font-semibold transition-colors",
+                    active ? "bg-brand-500 text-white" : done ? "bg-brand-100 text-brand-700" : "bg-stone-100 text-stone-500")}>
                     {done ? <Check size={12} strokeWidth={3} /> : i + 1}
                   </span>
-                  <span className={cls("text-xs", active ? "text-stone-900 font-medium" : "text-stone-400")}>{label}</span>
+                  <span className={cls("text-xs", active ? "text-stone-900 font-medium" : "text-stone-500")}>{label}</span>
                   {i < steps.length - 1 && <span className="w-6 h-px bg-stone-200" />}
                 </li>
               );
@@ -1581,7 +1577,7 @@ function AddRoomModal({ initialRoom, onClose, onSave, displayUnit }) {
               {SHAPE_TEMPLATES.map((t) => (
                 <button key={t.key} type="button" onClick={() => applyTemplate(t)}
                   className={cls("group flex flex-col items-center gap-1.5 p-3 rounded-xl border border-stone-200 bg-white hover:border-brand-500 hover:bg-brand-50 transition-colors", FOCUS_RING)}>
-                  <RoomThumbnail vertices={t.points} color="#3c7a6f" size={52} />
+                  <RoomThumbnail vertices={t.points} color="#d93732" size={52} />
                   <span className="text-xs font-medium text-stone-700 group-hover:text-brand-700">{t.label}</span>
                 </button>
               ))}
@@ -1589,7 +1585,7 @@ function AddRoomModal({ initialRoom, onClose, onSave, displayUnit }) {
 
             <div className="flex items-baseline justify-between gap-3 mb-2.5">
               <p className="text-sm font-medium text-stone-800">…or draw your own</p>
-              <p className="text-xs text-stone-500 hidden sm:block">Click to add corners · walls snap straight · click the <span className="text-brand-600 font-medium">green dot</span> to finish</p>
+              <p className="text-xs text-stone-600 hidden sm:block">Click to add corners · walls snap straight · click the <span className="text-brand-600 font-medium">green dot</span> to finish</p>
             </div>
             <div className="relative">
               <svg
@@ -1607,19 +1603,19 @@ function AddRoomModal({ initialRoom, onClose, onSave, displayUnit }) {
                   </pattern>
                 </defs>
                 <rect width={DRAW_W} height={DRAW_H} fill="url(#dotgrid)" />
-                {points.length > 1 && <polyline points={drawPtsStr} fill="#3c7a6f0d" stroke="#3c7a6f" strokeWidth="3" strokeLinejoin="round" />}
-                {previewLine && <polyline points={previewLine} fill="none" stroke="#c98a3a" strokeWidth="2" strokeDasharray="6 4" />}
+                {points.length > 1 && <polyline points={drawPtsStr} fill="#d937320d" stroke="#d93732" strokeWidth="3" strokeLinejoin="round" />}
+                {previewLine && <polyline points={previewLine} fill="none" stroke="#57534e" strokeWidth="2" strokeDasharray="6 4" />}
                 {points.map((p, i) => (
                   <g key={i}>
-                    {i === 0 && points.length >= 3 && <circle cx={p.x} cy={p.y} r={cursorNearStart ? 16 : 13} fill="#3c7a6f22" className="transition-all" />}
-                    <circle cx={p.x} cy={p.y} r={i === 0 ? 8 : 5.5} fill={i === 0 ? "#3c7a6f" : "white"} stroke={i === 0 ? "white" : "#3c7a6f"} strokeWidth="2.5" />
+                    {i === 0 && points.length >= 3 && <circle cx={p.x} cy={p.y} r={cursorNearStart ? 16 : 13} fill="#d9373222" className="transition-all" />}
+                    <circle cx={p.x} cy={p.y} r={i === 0 ? 8 : 5.5} fill={i === 0 ? "#d93732" : "white"} stroke={i === 0 ? "white" : "#d93732"} strokeWidth="2.5" />
                   </g>
                 ))}
-                {cursor && !cursorNearStart && <circle cx={cursor.x} cy={cursor.y} r="4" fill="#c98a3a" />}
+                {cursor && !cursorNearStart && <circle cx={cursor.x} cy={cursor.y} r="4" fill="#57534e" />}
               </svg>
               {points.length === 0 && (
                 <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                  <span className="flex items-center gap-2 text-xs text-stone-500 bg-white/95 px-3.5 py-2 rounded-full border border-stone-200 shadow-sm">
+                  <span className="flex items-center gap-2 text-xs text-stone-600 bg-white/95 px-3.5 py-2 rounded-full border border-stone-200 shadow-sm">
                     <MousePointerClick size={14} className="text-brand-500" /> Click anywhere to place the first corner
                   </span>
                 </div>
@@ -1647,7 +1643,7 @@ function AddRoomModal({ initialRoom, onClose, onSave, displayUnit }) {
                   vertices={shapeVerts} lengths={lengths} unit={unit} activeWall={activeWall}
                   onPickWall={(i) => wallInputs.current[i]?.focus()}
                 />
-                <p className="text-[11px] text-stone-400 mt-2 text-center">Tap a number on the shape to jump to that wall</p>
+                <p className="text-xs text-stone-500 mt-2 text-center">Tap a number on the shape to jump to that wall</p>
               </div>
 
               <div className="min-w-0">
@@ -1655,8 +1651,8 @@ function AddRoomModal({ initialRoom, onClose, onSave, displayUnit }) {
                   <p className="text-sm font-medium text-stone-800">Measure each wall</p>
                   <Segmented value={unit} onChange={changeUnit} options={[{ value: "mm", label: "mm" }, { value: "cm", label: "cm" }, { value: "m", label: "m" }]} />
                 </div>
-                <p className="text-xs text-stone-500 mb-3.5 leading-relaxed">
-                  Tip: leave <b className="font-medium text-stone-700">one side-to-side</b> and <b className="font-medium text-stone-700">one top-to-bottom</b> wall blank and they'll be calculated for you. Mixed units like <code className="text-[11px] bg-stone-100 px-1 rounded">3m 45cm</code> work too.
+                <p className="text-xs text-stone-600 mb-3.5 leading-relaxed">
+                  Tip: leave <b className="font-medium text-stone-700">one side-to-side</b> and <b className="font-medium text-stone-700">one top-to-bottom</b> wall blank and they'll be calculated for you. Mixed units like <code className="text-xs bg-stone-100 px-1 rounded">3m 45cm</code> work too.
                 </p>
                 <div className="grid sm:grid-cols-2 gap-2">
                   {directions.map((d, i) => {
@@ -1669,8 +1665,8 @@ function AddRoomModal({ initialRoom, onClose, onSave, displayUnit }) {
                         className={cls("flex items-center gap-2.5 h-11 bg-white border rounded-lg pl-2 pr-3 transition-colors cursor-text",
                           isActive ? "border-brand-500 ring-2 ring-brand-500/20" : "border-stone-200 hover:border-stone-300")}
                       >
-                        <span className={cls("w-6 h-6 rounded-full grid place-items-center text-[11px] font-semibold shrink-0", isActive ? "bg-brand-500 text-white" : "bg-stone-100 text-stone-500")}>{i + 1}</span>
-                        <Icon size={14} className="text-stone-400 shrink-0" aria-label={`Wall goes ${DIR_LABEL[d]}`} />
+                        <span className={cls("w-6 h-6 rounded-full grid place-items-center text-xs font-semibold shrink-0", isActive ? "bg-brand-500 text-white" : "bg-stone-100 text-stone-600")}>{i + 1}</span>
+                        <Icon size={14} className="text-stone-500 shrink-0" aria-label={`Wall goes ${DIR_LABEL[d]}`} />
                         <input
                           ref={(el) => (wallInputs.current[i] = el)}
                           value={lengths[i] ?? ""}
@@ -1684,8 +1680,8 @@ function AddRoomModal({ initialRoom, onClose, onSave, displayUnit }) {
                           className="flex-1 min-w-0 text-sm tabular-nums border-0 outline-none bg-transparent placeholder:text-stone-300"
                         />
                         {isCalc
-                          ? <span className="text-[11px] font-medium text-brand-700 bg-brand-50 rounded px-1.5 py-0.5 shrink-0 tabular-nums">= {formatLength(resolvedLengths[i], unit)}</span>
-                          : <span className="text-xs text-stone-400 shrink-0">{unit}</span>}
+                          ? <span className="text-xs font-medium text-brand-700 bg-brand-50 rounded px-1.5 py-0.5 shrink-0 tabular-nums">= {formatLength(resolvedLengths[i], unit)}</span>
+                          : <span className="text-xs text-stone-500 shrink-0">{unit}</span>}
                       </label>
                     );
                   })}
@@ -1733,7 +1729,7 @@ function AddRoomModal({ initialRoom, onClose, onSave, displayUnit }) {
                   <Field label="Cutting allowance" hint="Leave blank to use the roll default">
                     <div className="relative">
                       <input value={allowance} onChange={(e) => setAllowance(e.target.value)} inputMode="decimal" placeholder="Default" className={INPUT + " pr-10"} />
-                      <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-stone-400">cm</span>
+                      <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-stone-500">cm</span>
                     </div>
                   </Field>
                 </div>
@@ -1744,17 +1740,17 @@ function AddRoomModal({ initialRoom, onClose, onSave, displayUnit }) {
               </div>
               {previewVerts && (
                 <div className="bg-stone-50 border border-stone-200 rounded-xl p-4 flex flex-col items-center text-center self-start">
-                  <RoomThumbnail vertices={previewVerts} color={initialRoom?.color || "#3c7a6f"} size={120} />
+                  <RoomThumbnail vertices={previewVerts} color={initialRoom?.color || "#d93732"} size={120} />
                   <p className="text-sm font-medium text-stone-900 mt-2 truncate max-w-full">{name.trim() || "Untitled room"}</p>
-                  <p className="text-xs text-stone-500 tabular-nums mt-0.5">{formatLength(previewBB.maxX - previewBB.minX, "m")} × {formatLength(previewBB.maxY - previewBB.minY, "m")}</p>
-                  <p className="text-xs text-stone-500 tabular-nums">{formatArea(previewArea)}{parseInt(quantity) > 1 ? ` × ${parseInt(quantity)}` : ""}</p>
+                  <p className="text-xs text-stone-600 tabular-nums mt-0.5">{formatLength(previewBB.maxX - previewBB.minX, "m")} × {formatLength(previewBB.maxY - previewBB.minY, "m")}</p>
+                  <p className="text-xs text-stone-600 tabular-nums">{formatArea(previewArea)}{parseInt(quantity) > 1 ? ` × ${parseInt(quantity)}` : ""}</p>
                 </div>
               )}
             </div>
           </div>
           <div className="flex items-center gap-2 px-5 sm:px-6 py-4 border-t border-stone-100 bg-stone-50/60">
             <Button variant="ghost" onClick={() => setStep("dims")}><ChevronLeft size={16} /> Back</Button>
-            {!name.trim() && <span className="ml-auto text-xs text-stone-400 hidden sm:inline">Give the room a name to save it</span>}
+            {!name.trim() && <span className="ml-auto text-xs text-stone-500 hidden sm:inline">Give the room a name to save it</span>}
             <Button variant="primary" className={name.trim() ? "ml-auto" : "sm:ml-0 ml-auto"} onClick={handleSave} disabled={!name.trim()}><Check size={16} /> {initialRoom ? "Save changes" : "Add room"}</Button>
           </div>
         </>
@@ -1789,7 +1785,7 @@ function RollSettings({ rollWidth, setRollWidth, unit, setUnit, tolerance, setTo
 
   return (
     <div className="space-y-4">
-      <Field label="Roll width">
+      <Field label="Roll width" hint="How wide the carpet roll is. Most rolls are 4m or 5m.">
         <div className="relative">
           <input
             type="number" step="0.01" min="0.5" value={rollWidthText} inputMode="decimal"
@@ -1798,7 +1794,7 @@ function RollSettings({ rollWidth, setRollWidth, unit, setUnit, tolerance, setTo
             onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
             className={INPUT + " pr-9 tabular-nums font-medium"}
           />
-          <span className="absolute right-3 top-1/2 -translate-y-1/2 text-sm text-stone-400">m</span>
+          <span className="absolute right-3 top-1/2 -translate-y-1/2 text-sm text-stone-500">m</span>
         </div>
         <div className="flex gap-1.5 mt-2">
           {ROLL_PRESETS.map((w) => {
@@ -1822,7 +1818,7 @@ function RollSettings({ rollWidth, setRollWidth, unit, setUnit, tolerance, setTo
         type="button"
         onClick={() => setShowAdvanced((s) => !s)}
         aria-expanded={showAdvanced}
-        className={cls("w-full flex items-center justify-between text-xs font-medium text-stone-500 hover:text-stone-800 pt-3 border-t border-stone-100", FOCUS_RING)}
+        className={cls("w-full flex items-center justify-between text-xs font-medium text-stone-600 hover:text-stone-800 pt-3 border-t border-stone-100", FOCUS_RING)}
       >
         <span className="flex items-center gap-1.5"><Settings2 size={13} /> Advanced settings</span>
         <ChevronDown size={14} className={cls("transition-transform", showAdvanced && "rotate-180")} />
@@ -1858,8 +1854,8 @@ function RollSettings({ rollWidth, setRollWidth, unit, setUnit, tolerance, setTo
               checked={guillotineMode} onChange={setGuillotineMode}
               label="Straight cuts only"
               description={guillotineMode
-                ? "Auto arrange keeps every cut running straight across — easy with a knife and rule, though it may use a little more carpet."
-                : "Auto arrange can nest pieces into any gap (even the notch of an L-shape) for the tightest fit, but cuts may not be straight."}
+                ? "“Arrange for me” keeps every cut running straight across — easy with a knife and rule, though it may use a little more carpet."
+                : "“Arrange for me” can nest pieces into any gap (even the notch of an L-shape) for the tightest fit, but cuts may not be straight."}
             />
             <Toggle
               checked={allowOverlap} onChange={setAllowOverlap}
@@ -1882,8 +1878,8 @@ function RollSettings({ rollWidth, setRollWidth, unit, setUnit, tolerance, setTo
 function PlacedBadge({ placed, quantity }) {
   const done = placed >= quantity;
   return (
-    <span className={cls("inline-flex items-center gap-1 text-[11px] font-medium rounded-full px-2 py-0.5 tabular-nums",
-      done ? "bg-emerald-50 text-emerald-700" : placed > 0 ? "bg-amber-50 text-amber-700" : "bg-stone-100 text-stone-500")}>
+    <span className={cls("inline-flex items-center gap-1 text-xs font-medium rounded-full px-2 py-0.5 tabular-nums",
+      done ? "bg-emerald-50 text-emerald-700" : placed > 0 ? "bg-amber-50 text-amber-700" : "bg-stone-100 text-stone-600")}>
       {done ? <CheckCircle2 size={11} /> : <CircleDashed size={11} />}
       {placed}/{quantity} placed
     </span>
@@ -1897,7 +1893,7 @@ function RoomCard({ room, placed, unit, onEdit, onDuplicate, onDelete, onQuantit
       <button type="button" onClick={onEdit} title="Edit this room" className={cls("relative h-36 bg-stone-50 border-b border-stone-100 grid place-items-center", FOCUS_RING)}>
         <RoomThumbnail vertices={room.vertices} color={room.color} size={116} />
         <span className="absolute top-2.5 right-2.5"><PlacedBadge placed={placed} quantity={room.quantity} /></span>
-        <span className="absolute bottom-2.5 right-2.5 opacity-0 group-hover:opacity-100 transition-opacity text-[11px] font-medium text-stone-600 bg-white border border-stone-200 rounded-md px-2 py-1 flex items-center gap-1 shadow-sm"><Pencil size={11} /> Edit</span>
+        <span className="absolute bottom-2.5 right-2.5 opacity-0 group-hover:opacity-100 transition-opacity text-xs font-medium text-stone-600 bg-white border border-stone-200 rounded-md px-2 py-1 flex items-center gap-1 shadow-sm"><Pencil size={11} /> Edit</span>
       </button>
       <div className="p-4 flex-1 flex flex-col gap-3">
         <div className="min-w-0">
@@ -1905,8 +1901,8 @@ function RoomCard({ room, placed, unit, onEdit, onDuplicate, onDelete, onQuantit
             <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: room.color }} />
             <h3 className="text-sm font-semibold text-stone-900 truncate">{room.name}</h3>
           </div>
-          <p className="text-xs text-stone-500 tabular-nums mt-1">{formatLength(room.width, unit)} × {formatLength(room.length, unit)} · {formatArea(room.area)} · {room.corners} corners</p>
-          {room.notes && <p className="text-xs text-stone-400 mt-1 line-clamp-2">{room.notes}</p>}
+          <p className="text-xs text-stone-600 tabular-nums mt-1">{formatLength(room.width, unit)} × {formatLength(room.length, unit)} · {formatArea(room.area)} · {room.corners} corners</p>
+          {room.notes && <p className="text-xs text-stone-500 mt-1 line-clamp-2">{room.notes}</p>}
         </div>
         <div className="flex items-center justify-between">
           <span className="text-xs text-stone-600">Quantity</span>
@@ -1935,49 +1931,53 @@ function RoomCard({ room, placed, unit, onEdit, onDuplicate, onDelete, onQuantit
   );
 }
 
-function EmptyRooms({ onAddRoom }) {
+function EmptyRooms({ onAddRoom, onOpenHelp }) {
   const steps = [
     { icon: Pencil, title: "Add your rooms", body: "Pick a rectangle or L-shape, or draw any shape corner by corner." },
     { icon: Ruler, title: "Enter the measurements", body: "Type each wall's length — we'll work out the last one for you." },
-    { icon: Sparkles, title: "Lay out & cut", body: "Place rooms on the roll, hit Auto arrange, then export the cutting plan." },
+    { icon: Sparkles, title: "Lay out & cut", body: "Place rooms on the roll, press “Arrange for me”, then print or save the plan." },
   ];
   return (
     <div className="bg-white border border-stone-200 rounded-2xl shadow-sm px-6 py-10 sm:px-10 text-center">
       <div className="w-14 h-14 mx-auto rounded-2xl bg-brand-50 text-brand-500 grid place-items-center mb-4"><LayoutGrid size={26} /></div>
-      <h2 className="text-lg font-semibold text-stone-900">Plan your first cut</h2>
-      <p className="text-sm text-stone-500 mt-1 max-w-md mx-auto">Work out how much carpet you need and exactly where to cut it, in three steps.</p>
+      <h2 className="font-display text-2xl font-semibold uppercase tracking-wide text-stone-900">Let’s plan your carpet</h2>
+      <p className="text-sm text-stone-600 mt-1 max-w-md mx-auto">Find out how much carpet you need and exactly where to cut it — in three easy steps.</p>
       <ol className="grid sm:grid-cols-3 gap-3 mt-7 text-left">
         {steps.map((s, i) => (
           <li key={s.title} className="rounded-xl bg-stone-50 border border-stone-100 p-4">
             <div className="flex items-center gap-2 mb-1.5">
-              <span className="w-6 h-6 rounded-full bg-white border border-stone-200 grid place-items-center text-[11px] font-semibold text-stone-600">{i + 1}</span>
+              <span className="w-6 h-6 rounded-full bg-white border border-stone-200 grid place-items-center text-xs font-semibold text-stone-600">{i + 1}</span>
               <s.icon size={14} className="text-brand-500" />
             </div>
             <p className="text-sm font-medium text-stone-900">{s.title}</p>
-            <p className="text-xs text-stone-500 mt-1 leading-relaxed">{s.body}</p>
+            <p className="text-xs text-stone-600 mt-1 leading-relaxed">{s.body}</p>
           </li>
         ))}
       </ol>
-      <Button variant="primary" size="lg" className="mt-7" onClick={onAddRoom}><Plus size={18} /> Add your first room</Button>
+      <div className="mt-7 flex flex-wrap items-center justify-center gap-3">
+        <Button variant="primary" size="lg" onClick={onAddRoom}><Plus size={18} /> Add your first room</Button>
+        <Button variant="secondary" size="lg" onClick={onOpenHelp}><HelpCircle size={18} /> Show me how</Button>
+      </div>
     </div>
   );
 }
 
-function RoomsView({ rooms, placedByRoom, unit, onAddRoom, onEditRoom, onDeleteRoom, onDuplicateRoom, onQuantityChange, onPlaceOnCarpet, onPlaceAll, onGoToLayout, settings, totals }) {
+function RoomsView({ projectName, setProjectName, onOpenHelp, rooms, placedByRoom, unit, onAddRoom, onEditRoom, onDeleteRoom, onDuplicateRoom, onQuantityChange, onPlaceOnCarpet, onPlaceAll, onGoToLayout, settings, totals }) {
   const remaining = totals.needed - totals.placed;
   return (
     <div className="flex-1 min-h-0 overflow-y-auto bg-stone-50">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 lg:py-8 grid lg:grid-cols-[minmax(0,1fr)_320px] gap-6 lg:gap-8">
         <section className="min-w-0">
           <div className="flex flex-wrap items-end justify-between gap-3 mb-5">
-            <div>
-              <h1 className="text-xl font-semibold text-stone-900">Rooms</h1>
-              <p className="text-sm text-stone-500 mt-0.5">Add each room once and set how many you need.</p>
+            <div className="min-w-0">
+              <ProjectNameField projectName={projectName} setProjectName={setProjectName} />
+              <h1 className="font-display text-3xl font-semibold uppercase tracking-wide text-stone-900 mt-1">Your rooms</h1>
+              <p className="text-sm text-stone-600 mt-1">Add every room that needs carpet, and how many of each.</p>
             </div>
             {rooms.length > 0 && <Button variant="primary" onClick={onAddRoom}><Plus size={16} /> Add room</Button>}
           </div>
           {rooms.length === 0 ? (
-            <EmptyRooms onAddRoom={onAddRoom} />
+            <EmptyRooms onAddRoom={onAddRoom} onOpenHelp={onOpenHelp} />
           ) : (
             <div className="grid sm:grid-cols-2 xl:grid-cols-3 gap-4">
               {rooms.map((room) => (
@@ -1988,7 +1988,7 @@ function RoomsView({ rooms, placedByRoom, unit, onAddRoom, onEditRoom, onDeleteR
                 />
               ))}
               <button type="button" onClick={onAddRoom}
-                className={cls("min-h-[200px] rounded-xl border-2 border-dashed border-stone-200 text-stone-400 hover:text-brand-600 hover:border-brand-500 hover:bg-brand-50/50 transition-colors flex flex-col items-center justify-center gap-2", FOCUS_RING)}>
+                className={cls("min-h-[200px] rounded-xl border-2 border-dashed border-stone-200 text-stone-500 hover:text-brand-600 hover:border-brand-500 hover:bg-brand-50/50 transition-colors flex flex-col items-center justify-center gap-2", FOCUS_RING)}>
                 <Plus size={22} />
                 <span className="text-sm font-medium">Add another room</span>
               </button>
@@ -1999,12 +1999,12 @@ function RoomsView({ rooms, placedByRoom, unit, onAddRoom, onEditRoom, onDeleteR
         <aside className="space-y-4 lg:sticky lg:top-8 self-start">
           {rooms.length > 0 && (
             <Panel>
-              <p className="text-xs font-medium text-stone-500">Next step</p>
+              <p className="text-xs font-medium text-stone-600">Next step</p>
               <p className="text-sm font-semibold text-stone-900 mt-0.5">Lay your rooms out on the roll</p>
               <div className="mt-3 h-2 rounded-full bg-stone-100 overflow-hidden">
                 <div className="h-full bg-brand-500 rounded-full transition-all" style={{ width: `${totals.needed ? Math.min(100, (totals.placed / totals.needed) * 100) : 0}%` }} />
               </div>
-              <p className="text-xs text-stone-500 mt-1.5 tabular-nums">{totals.placed} of {totals.needed} pieces on the carpet</p>
+              <p className="text-xs text-stone-600 mt-1.5 tabular-nums">{totals.placed} of {totals.needed} pieces on the carpet</p>
               <div className="flex flex-col gap-2 mt-4">
                 {remaining > 0 && <Button variant="primary" className="w-full" onClick={onPlaceAll}><Layers size={15} /> Place all {remaining} remaining</Button>}
                 <Button variant={remaining > 0 ? "secondary" : "primary"} className="w-full" onClick={onGoToLayout}>Open cutting layout <ArrowRight size={15} /></Button>
@@ -2035,7 +2035,7 @@ function RoomTray({ rooms, placedByRoom, onPlaceOnCarpet, onPlaceAll, onAddRoom,
         {rooms.length === 0 && (
           <div className="text-center px-3 py-8">
             <p className="text-sm text-stone-600 font-medium">No rooms yet</p>
-            <p className="text-xs text-stone-400 mt-1 mb-4">Add a room to start laying out your carpet.</p>
+            <p className="text-xs text-stone-500 mt-1 mb-4">Add a room to start laying out your carpet.</p>
             <Button variant="primary" size="sm" onClick={onAddRoom}><Plus size={14} /> Add room</Button>
           </div>
         )}
@@ -2057,7 +2057,7 @@ function RoomTray({ rooms, placedByRoom, onPlaceOnCarpet, onPlaceAll, onAddRoom,
               </div>
               <div className="flex-1 min-w-0">
                 <p className="text-sm font-medium text-stone-800 truncate">{room.name}</p>
-                <p className={cls("text-[11px] tabular-nums", placed >= room.quantity ? "text-emerald-600" : "text-stone-400")}>
+                <p className={cls("text-xs tabular-nums", placed >= room.quantity ? "text-emerald-600" : "text-stone-500")}>
                   {placed}/{room.quantity} placed
                 </p>
               </div>
@@ -2067,7 +2067,7 @@ function RoomTray({ rooms, placedByRoom, onPlaceOnCarpet, onPlaceAll, onAddRoom,
         })}
       </div>
       {rooms.length > 0 && (
-        <p className="text-[11px] text-stone-400 px-4 py-3 border-t border-stone-100 leading-snug">Drag a room onto the roll, or press <b className="font-medium text-stone-500">+</b> to add it below the others.</p>
+        <p className="text-xs text-stone-500 px-4 py-3 border-t border-stone-100 leading-snug">Drag a room onto the roll, or press <b className="font-medium text-stone-600">+</b> to add it below the others.</p>
       )}
     </aside>
   );
@@ -2076,9 +2076,9 @@ function RoomTray({ rooms, placedByRoom, onPlaceOnCarpet, onPlaceAll, onAddRoom,
 function StatTile({ label, value, sub, tone }) {
   return (
     <div className="rounded-lg bg-stone-50 border border-stone-100 px-3 py-2.5">
-      <p className="text-[11px] text-stone-500">{label}</p>
-      <p className={cls("text-base font-semibold tabular-nums mt-0.5", tone === "accent" ? "text-accent-600" : "text-stone-900")}>{value}</p>
-      {sub && <p className="text-[11px] text-stone-400 tabular-nums">{sub}</p>}
+      <p className="text-xs text-stone-600">{label}</p>
+      <p className={cls("text-base font-semibold tabular-nums mt-0.5", tone === "accent" ? "text-brand-600" : "text-stone-900")}>{value}</p>
+      {sub && <p className="text-xs text-stone-500 tabular-nums">{sub}</p>}
     </div>
   );
 }
@@ -2104,7 +2104,7 @@ function AllowanceOverrideInput({ instance, onChange }) {
         onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
         className={INPUT + " pr-10"}
       />
-      <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-stone-400">cm</span>
+      <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-stone-500">cm</span>
     </div>
   );
 }
@@ -2126,7 +2126,7 @@ function Inspector({ instance, room, onRotate, onDelete, onDuplicate, onAllowanc
           <RoomThumbnail vertices={rotatePolygon(room.vertices, instance.rotation)} color={room.color} size={42} />
         </div>
         <div className="min-w-0 flex-1">
-          <p className="text-[11px] text-stone-500">Selected piece</p>
+          <p className="text-xs text-stone-600">Selected piece</p>
           <h3 className="text-sm font-semibold text-stone-900 truncate">{room.name}</h3>
         </div>
         <IconButton label="Deselect (Esc)" onClick={onDeselect} className="w-8 h-8 -mr-1 -mt-1"><X size={15} /></IconButton>
@@ -2135,7 +2135,7 @@ function Inspector({ instance, room, onRotate, onDelete, onDuplicate, onAllowanc
       <dl className="text-xs rounded-lg border border-stone-100 divide-y divide-stone-100">
         {rows.map(([k, v]) => (
           <div key={k} className="flex justify-between gap-3 px-3 py-2">
-            <dt className="text-stone-500">{k}</dt><dd className="text-stone-900 font-medium tabular-nums text-right">{v}</dd>
+            <dt className="text-stone-600">{k}</dt><dd className="text-stone-900 font-medium tabular-nums text-right">{v}</dd>
           </div>
         ))}
       </dl>
@@ -2171,17 +2171,18 @@ function LayoutSidebar({ selectedInstance, selectedRoom, inspectorProps, stats, 
       ) : (
         <div className="p-4 space-y-5">
           <div>
-            <h2 className="text-sm font-semibold text-stone-900 mb-3">Summary</h2>
+            <ProjectNameField projectName={stats.projectName} setProjectName={stats.setProjectName} />
+            <h2 className="text-sm font-semibold text-stone-900 mt-3 mb-3">Summary</h2>
             <div className="grid grid-cols-2 gap-2">
               <StatTile label="Carpet to buy" value={stats.lengthLabel} sub={`× ${(stats.rollWidth / 1000).toFixed(2)}m roll`} tone="accent" />
               <StatTile label="Pieces placed" value={`${stats.placed}/${stats.needed}`} sub={stats.placed < stats.needed ? `${stats.needed - stats.placed} to go` : "All placed"} />
               <StatTile label="Carpet used" value={stats.usedLabel} sub={`of ${stats.areaLabel}`} />
               <StatTile label="Offcut waste" value={stats.wastePctLabel} sub={stats.wasteLabel} />
             </div>
-            <p className="text-xs text-stone-400 mt-3 flex items-start gap-1.5 leading-snug"><MousePointerClick size={13} className="shrink-0 mt-px" /> Click a piece on the roll to rotate, duplicate or remove it.</p>
+            <p className="text-xs text-stone-500 mt-3 flex items-start gap-1.5 leading-snug"><MousePointerClick size={13} className="shrink-0 mt-px" /> Click a piece on the roll to rotate, duplicate or remove it.</p>
           </div>
           <div className="pt-4 border-t border-stone-100">
-            <h2 className="text-sm font-semibold text-stone-900 mb-3 flex items-center gap-2"><Ruler size={14} className="text-stone-400" /> Carpet roll</h2>
+            <h2 className="text-sm font-semibold text-stone-900 mb-3 flex items-center gap-2"><Ruler size={14} className="text-stone-500" /> Carpet roll</h2>
             <RollSettings {...settings} />
           </div>
         </div>
@@ -2454,27 +2455,27 @@ function CuttingCanvas({ rooms, roomsById, instances, setInstances, rollWidth, t
       {/* Toolbar */}
       <div className="shrink-0 flex flex-wrap items-center gap-x-5 gap-y-2 px-4 py-2 min-h-[48px] bg-white border-b border-stone-200">
         <div className="flex items-baseline gap-1.5">
-          <span className="text-xs text-stone-500">Carpet needed</span>
-          <span className="text-base font-semibold text-accent-600 tabular-nums">{stats.lengthLabel}</span>
-          <span className="text-xs text-stone-400 tabular-nums">× {(rollWidth / 1000).toFixed(2)}m</span>
+          <span className="text-xs text-stone-600">Carpet needed</span>
+          <span className="text-base font-semibold text-brand-600 tabular-nums">{stats.lengthLabel}</span>
+          <span className="text-xs text-stone-500 tabular-nums">× {(rollWidth / 1000).toFixed(2)}m</span>
         </div>
         <div className="hidden sm:flex items-baseline gap-1.5">
-          <span className="text-xs text-stone-500">Waste</span>
+          <span className="text-xs text-stone-600">Waste</span>
           <span className="text-sm font-medium text-stone-800 tabular-nums">{stats.wastePctLabel}</span>
         </div>
         {invalidIds.size > 0 && (
-          <span title={allowOverlap ? "Overlaps are allowed — move pieces apart or use Auto arrange to fix them" : "These will snap clear once you move them"}
+          <span title={allowOverlap ? "Overlaps are allowed — move pieces apart or use “Arrange for me” to fix them" : "These will snap clear once you move them"}
             className="inline-flex items-center gap-1.5 text-xs font-medium text-red-700 bg-red-50 border border-red-100 rounded-full px-2.5 py-1">
             <AlertTriangle size={12} /> {invalidIds.size} overlapping
           </span>
         )}
         <div className="ml-auto flex items-center gap-2">
           <Button
-            variant="accent" onClick={onAutoArrange} disabled={arranging || instances.length === 0}
+            variant="primary" onClick={onAutoArrange} disabled={arranging || instances.length === 0}
             title="Search for the shortest layout using each room's exact shape — the current plan is only replaced by a better one"
           >
             {arranging ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />}
-            {arranging ? "Arranging…" : "Auto arrange"}
+            {arranging ? "Working it out…" : "Arrange for me"}
           </Button>
         </div>
       </div>
@@ -2526,9 +2527,9 @@ function CuttingCanvas({ rooms, roomsById, instances, setInstances, rollWidth, t
               {/* required-length marker */}
               {reqLength > 0 && (
                 <g>
-                  <line x1={0} y1={reqLength * pxPerMm} x2={widthPx} y2={reqLength * pxPerMm} stroke="#c2410c" strokeWidth="1.5" strokeDasharray="6 4" />
+                  <line x1={0} y1={reqLength * pxPerMm} x2={widthPx} y2={reqLength * pxPerMm} stroke="#b8282a" strokeWidth="1.5" strokeDasharray="6 4" />
                   <g transform={`translate(${widthPx + 6},${reqLength * pxPerMm})`}>
-                    <rect x={0} y={-10} width={58} height={20} rx={10} fill="#c2410c" />
+                    <rect x={0} y={-10} width={58} height={20} rx={10} fill="#b8282a" />
                     <text x={29} y={4} fontSize="10.5" fontWeight="600" textAnchor="middle" fill="white">{(reqLength / 1000).toFixed(2)}m</text>
                   </g>
                 </g>
@@ -2591,13 +2592,13 @@ function CuttingCanvas({ rooms, roomsById, instances, setInstances, rollWidth, t
               {rooms.length > 0 ? (
                 <>
                   <p className="text-sm font-semibold text-stone-900">Your roll is empty</p>
-                  <p className="text-xs text-stone-500 mt-1 leading-relaxed">Drag rooms here from the list, or place them all at once and let Auto arrange pack them tightly.</p>
+                  <p className="text-xs text-stone-600 mt-1 leading-relaxed">Drag rooms here from the list, or place them all at once and let “Arrange for me” pack them tightly.</p>
                   <Button variant="primary" className="mt-4" onClick={onPlaceAll}><Layers size={15} /> Place all rooms</Button>
                 </>
               ) : (
                 <>
                   <p className="text-sm font-semibold text-stone-900">No rooms to place yet</p>
-                  <p className="text-xs text-stone-500 mt-1 leading-relaxed">Add your rooms first, then come back here to lay them out on the roll.</p>
+                  <p className="text-xs text-stone-600 mt-1 leading-relaxed">Add your rooms first, then come back here to lay them out on the roll.</p>
                   <Button variant="primary" className="mt-4" onClick={onGoToRooms}><Plus size={15} /> Add rooms</Button>
                 </>
               )}
@@ -2616,11 +2617,9 @@ function CuttingCanvas({ rooms, roomsById, instances, setInstances, rollWidth, t
         )}
 
         {/* Hints + zoom */}
-        <div className="hidden md:flex absolute bottom-4 left-4 items-center gap-2 text-[11px] text-stone-500 bg-white/90 backdrop-blur border border-stone-200 rounded-lg px-2.5 py-1.5 shadow-sm pointer-events-none">
-          <span>Drag to move</span><span className="text-stone-300">·</span>
-          <Kbd>R</Kbd><span>rotate</span><span className="text-stone-300">·</span>
-          <Kbd>Del</Kbd><span>remove</span><span className="text-stone-300">·</span>
-          <Kbd>Ctrl</Kbd><span>+ scroll to zoom</span>
+        <div className="hidden md:flex absolute bottom-4 left-4 items-center gap-2 text-xs text-stone-600 bg-white/90 backdrop-blur border border-stone-200 rounded-lg px-2.5 py-1.5 shadow-sm pointer-events-none">
+          <MousePointerClick size={14} className="text-brand-600" />
+          <span>Drag a piece to move it · click a piece to turn or remove it</span>
         </div>
         <div className="absolute bottom-4 right-4 flex items-center bg-white border border-stone-200 rounded-lg shadow-sm p-0.5">
           <IconButton label="Zoom out" onClick={() => zoom(0.85)} className="w-8 h-8"><ZoomOut size={15} /></IconButton>
@@ -2637,60 +2636,134 @@ function CuttingCanvas({ rooms, roomsById, instances, setInstances, rollWidth, t
    ====================================================================== */
 
 function SaveStatus({ state }) {
-  if (state === "saving") return <span className="hidden md:flex items-center gap-1.5 text-xs text-stone-400 px-2"><Loader2 size={12} className="animate-spin" /> Saving…</span>;
-  return <span className="hidden md:flex items-center gap-1.5 text-xs text-stone-400 px-2"><CheckCircle2 size={13} className="text-emerald-500" /> All changes saved</span>;
+  if (state === "saving") return <span className="hidden lg:flex items-center gap-1.5 text-xs text-stone-300 px-2"><Loader2 size={13} className="animate-spin" /> Saving…</span>;
+  return <span className="hidden lg:flex items-center gap-1.5 text-xs text-stone-300 px-2" title="Your work is saved on this device automatically"><CheckCircle2 size={14} className="text-emerald-400" /> Saved</span>;
 }
 
-function TopBar({ projectName, setProjectName, onUndo, onRedo, canUndo, canRedo, onSave, saveState, view, setView, onOpenCuttingPlan, roomCount, instanceCount }) {
+// Dark brand bar, matching the srcarpetsandfloors.co.uk navigation.
+const DARK_ICON_BTN = "text-stone-300 hover:bg-white/10 hover:text-white";
+
+function TopBar({ onUndo, onRedo, canUndo, canRedo, onSave, saveState, view, setView, onOpenCuttingPlan, onOpenHelp, roomCount, instanceCount }) {
   const tabs = [
-    { key: "rooms", n: 1, label: "Rooms", short: "Rooms", count: roomCount },
-    { key: "cutting", n: 2, label: "Cutting layout", short: "Layout", count: instanceCount },
+    { key: "rooms", n: 1, label: "Your rooms", short: "Rooms", count: roomCount },
+    { key: "cutting", n: 2, label: "Plan the cut", short: "Plan", count: instanceCount },
   ];
   return (
-    <header className="shrink-0 h-14 flex items-center gap-2 sm:gap-3 px-3 sm:px-4 bg-white border-b border-stone-200">
-      <div className="flex items-center gap-2.5 shrink-0">
-        <div className="w-8 h-8 rounded-lg bg-brand-500 text-white grid place-items-center shadow-sm"><ScissorsLineDashed size={16} /></div>
-        <span className="hidden xl:block text-sm font-semibold text-stone-900">Carpet Planner</span>
-      </div>
-      <span className="hidden xl:block h-6 w-px bg-stone-200" />
-      <div className="relative group min-w-0 hidden sm:block">
-        <input
-          value={projectName} onChange={(e) => setProjectName(e.target.value)}
-          aria-label="Project name" title="Rename project"
-          className="h-9 w-40 lg:w-56 rounded-lg pl-2.5 pr-7 text-sm font-medium text-stone-800 bg-transparent border border-transparent hover:bg-stone-50 hover:border-stone-200 focus:bg-white focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20 focus:outline-none transition truncate"
-        />
-        <Pencil size={12} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-stone-300 group-hover:text-stone-400 pointer-events-none" />
-      </div>
+    <header className="shrink-0 bg-ink-900 text-white">
+      <div className="h-16 flex items-center gap-1.5 sm:gap-4 px-2.5 sm:px-5">
+        <a href="https://srcarpetsandfloors.co.uk/" target="_blank" rel="noreferrer" title="SR Carpets & Floors" className="flex items-center gap-3 shrink-0">
+          <img src="/sr-logo-white.png" alt="SR Carpets & Floors" className="hidden md:block h-9 w-auto" />
+          <img src="/sr-mark-white.png" alt="SR Carpets & Floors" className="md:hidden h-7 w-auto" />
+        </a>
+        <span className="hidden xl:flex items-center gap-3 font-display text-sm font-medium uppercase tracking-[0.22em] text-stone-500">
+          <span className="w-px h-5 bg-white/20" /> Carpet Planner
+        </span>
 
-      <nav className="mx-auto flex items-center gap-0.5 sm:gap-1 bg-stone-100 rounded-xl p-1 min-w-0" aria-label="Steps">
-        {tabs.map((t, i) => {
-          const active = view === t.key;
-          return (
-            <React.Fragment key={t.key}>
-              {i > 0 && <ChevronRight size={14} className="text-stone-300 hidden sm:block" />}
-              <button
-                type="button" onClick={() => setView(t.key)} aria-current={active ? "page" : undefined}
-                className={cls("flex items-center gap-1.5 sm:gap-2 h-8 pl-1.5 pr-2 sm:pr-3 rounded-lg text-sm font-medium transition-all", FOCUS_RING, active ? "bg-white text-stone-900 shadow-sm" : "text-stone-500 hover:text-stone-800")}
-              >
-                <span className={cls("w-5 h-5 rounded-md grid place-items-center text-[11px] font-semibold", active ? "bg-brand-500 text-white" : "bg-stone-200 text-stone-500")}>{t.n}</span>
-                <span className="hidden sm:inline">{t.label}</span><span className="sm:hidden">{t.short}</span>
-                {t.count > 0 && <span className={cls("hidden sm:inline text-[11px] tabular-nums rounded-full px-1.5 min-w-[20px]", active ? "bg-stone-100 text-stone-600" : "bg-stone-200/70 text-stone-500")}>{t.count}</span>}
-              </button>
-            </React.Fragment>
-          );
-        })}
-      </nav>
+        <nav className="mx-auto flex items-center gap-0.5 sm:gap-1 bg-white/[0.07] rounded-xl p-1 min-w-0 overflow-hidden" aria-label="Steps">
+          {tabs.map((t, i) => {
+            const active = view === t.key;
+            return (
+              <React.Fragment key={t.key}>
+                {i > 0 && <ChevronRight size={15} className="text-white/25 hidden sm:block" />}
+                <button
+                  type="button" onClick={() => setView(t.key)} aria-current={active ? "page" : undefined} aria-label={t.label} title={t.label}
+                  className={cls("flex items-center gap-1.5 sm:gap-2 h-10 pl-1.5 sm:pl-2 pr-2 sm:pr-4 rounded-lg text-sm font-semibold transition-all", FOCUS_RING,
+                    active ? "bg-white text-ink-900 shadow" : "text-stone-300 hover:text-white hover:bg-white/5")}
+                >
+                  <span className={cls("w-6 h-6 rounded-md grid place-items-center text-xs font-bold", active ? "bg-brand-500 text-white" : "bg-white/10 text-stone-300")}>{t.n}</span>
+                  <span className="hidden sm:inline">{t.label}</span><span className={active ? "sm:hidden" : "hidden"}>{t.short}</span>
+                  {t.count > 0 && <span className={cls("hidden sm:inline text-xs tabular-nums rounded-full px-1.5 min-w-[22px]", active ? "bg-stone-100 text-stone-600" : "bg-white/10 text-stone-300")}>{t.count}</span>}
+                </button>
+              </React.Fragment>
+            );
+          })}
+        </nav>
 
-      <div className="flex items-center gap-0.5 sm:gap-1 shrink-0">
-        <SaveStatus state={saveState} />
-        <IconButton label="Undo (Ctrl+Z)" onClick={onUndo} disabled={!canUndo}><Undo2 size={17} /></IconButton>
-        <IconButton label="Redo (Ctrl+Y)" onClick={onRedo} disabled={!canRedo}><Redo2 size={17} /></IconButton>
-        <IconButton label="Save now — the project also saves automatically" onClick={onSave} className="hidden sm:inline-flex"><Save size={17} /></IconButton>
-        <Button variant="primary" size="md" className="ml-1 h-9" onClick={onOpenCuttingPlan} title="Open a clean, printable cutting plan">
-          <FileText size={15} /> <span className="hidden sm:inline">Cutting plan</span>
-        </Button>
+        <div className="flex items-center gap-0.5 sm:gap-1 shrink-0">
+          <SaveStatus state={saveState} />
+          <IconButton label="Undo — take back the last change" onClick={onUndo} disabled={!canUndo} className={DARK_ICON_BTN + " w-9 sm:w-10 h-10"}><Undo2 size={19} /></IconButton>
+          <IconButton label="Redo" onClick={onRedo} disabled={!canRedo} className={DARK_ICON_BTN + " w-10 h-10 hidden sm:inline-flex"}><Redo2 size={19} /></IconButton>
+          <IconButton label="Save now — your work also saves automatically" onClick={onSave} className={DARK_ICON_BTN + " w-10 h-10 hidden md:inline-flex"}><Save size={19} /></IconButton>
+          <Button variant="ghost" className="h-10 px-2 sm:px-3 !text-stone-200 hover:!bg-white/10 hover:!text-white" onClick={onOpenHelp} title="How to use the planner">
+            <HelpCircle size={18} /> <span className="hidden lg:inline">Help</span>
+          </Button>
+          <Button variant="primary" className="ml-0.5 sm:ml-1 h-10 px-3 sm:px-4" onClick={onOpenCuttingPlan} title="See the finished plan and print or save it">
+            <Printer size={17} /> <span className="hidden sm:inline">Print / save plan</span>
+          </Button>
+        </div>
       </div>
+      {/* thin brand rule */}
+      <div className="h-[3px] bg-brand-500" />
     </header>
+  );
+}
+
+function ProjectNameField({ projectName, setProjectName }) {
+  return (
+    <label className="group inline-flex items-center gap-2 min-w-0 max-w-full">
+      <span className="sr-only">Project name</span>
+      <input
+        value={projectName} onChange={(e) => setProjectName(e.target.value)}
+        title="Click to rename this project"
+        className="min-w-0 w-64 max-w-full h-9 -ml-2 rounded-lg px-2 text-sm font-semibold text-stone-800 bg-transparent border border-transparent hover:bg-white hover:border-stone-200 focus:bg-white focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20 focus:outline-none transition truncate"
+      />
+      <Pencil size={13} className="-ml-8 text-stone-500 pointer-events-none shrink-0" />
+    </label>
+  );
+}
+
+/* ======================================================================
+   SECTION: HELP GUIDE — plain-English walkthrough for first-time users
+   ====================================================================== */
+
+function HelpModal({ onClose }) {
+  const steps = [
+    { icon: Plus, title: "Add each room", body: "On “Your rooms”, press Add room. Pick the shape that looks most like the room — a plain rectangle, an L-shape or a T-shape. If none fit, click on the grid to draw the corners yourself." },
+    { icon: Ruler, title: "Type in the measurements", body: "Type the length of each wall. The numbered picture shows which wall is which. You can leave one width and one length empty and the planner will work them out." },
+    { icon: Layers, title: "Put the rooms on the roll", body: "Go to “Plan the cut” and press Place all rooms. Every room you need appears on the carpet roll." },
+    { icon: Sparkles, title: "Press “Arrange for me”", body: "The planner fits the pieces together to use as little carpet as possible. You can also drag pieces around yourself, and click a piece to turn or remove it." },
+    { icon: Printer, title: "Print or save the plan", body: "Press Print / save plan at the top to download a picture or PDF showing exactly where to cut, and how much carpet to buy." },
+  ];
+  return (
+    <Modal onClose={onClose} className="max-w-2xl" labelledBy="help-title">
+      <div className="flex items-start justify-between gap-4 px-6 pt-6 pb-4 border-b border-stone-100">
+        <div>
+          <p className="font-display text-xs font-semibold uppercase tracking-[0.24em] text-brand-600">SR Carpets &amp; Floors</p>
+          <h2 id="help-title" className="text-xl font-semibold text-stone-900 mt-1">How to use the Carpet Planner</h2>
+          <p className="text-sm text-stone-600 mt-1">Five simple steps — no experience needed.</p>
+        </div>
+        <IconButton label="Close" onClick={onClose}><X size={20} /></IconButton>
+      </div>
+      <div className="flex-1 overflow-y-auto px-6 py-5">
+        <ol className="space-y-4">
+          {steps.map((s, i) => (
+            <li key={s.title} className="flex gap-4">
+              <div className="shrink-0 w-11 h-11 rounded-xl bg-brand-50 text-brand-600 grid place-items-center relative">
+                <s.icon size={20} />
+                <span className="absolute -top-1.5 -left-1.5 w-5 h-5 rounded-full bg-ink-900 text-white text-[11px] font-bold grid place-items-center">{i + 1}</span>
+              </div>
+              <div className="min-w-0">
+                <p className="text-sm font-semibold text-stone-900">{s.title}</p>
+                <p className="text-sm text-stone-600 mt-0.5 leading-relaxed">{s.body}</p>
+              </div>
+            </li>
+          ))}
+        </ol>
+        <div className="mt-6 grid sm:grid-cols-2 gap-3">
+          <div className="rounded-xl bg-stone-50 border border-stone-100 p-4">
+            <p className="text-sm font-semibold text-stone-900 flex items-center gap-2"><Undo2 size={16} className="text-brand-600" /> Made a mistake?</p>
+            <p className="text-sm text-stone-600 mt-1 leading-relaxed">Press the curved arrow at the top to undo your last change.</p>
+          </div>
+          <div className="rounded-xl bg-stone-50 border border-stone-100 p-4">
+            <p className="text-sm font-semibold text-stone-900 flex items-center gap-2"><CheckCircle2 size={16} className="text-brand-600" /> Saved for you</p>
+            <p className="text-sm text-stone-600 mt-1 leading-relaxed">Everything saves automatically on this device, so you can close the page and come back later.</p>
+          </div>
+        </div>
+      </div>
+      <div className="px-6 py-4 border-t border-stone-100 bg-stone-50/60 flex justify-end">
+        <Button variant="primary" onClick={onClose}>Got it</Button>
+      </div>
+    </Modal>
   );
 }
 
@@ -2903,7 +2976,7 @@ function CuttingPlanModal({ onClose, roomsById, instances, rollWidth, projectNam
       <div className="flex flex-wrap items-center gap-3 px-5 sm:px-6 py-4 border-b border-stone-100 shrink-0">
         <div className="min-w-0 mr-auto">
           <h2 id="plan-title" className="text-lg font-semibold text-stone-900 truncate">Cutting plan</h2>
-          <p className="text-xs text-stone-500 truncate">{projectName}</p>
+          <p className="text-xs text-stone-600 truncate">{projectName}</p>
         </div>
         <Button variant="secondary" onClick={exportAsPDF} disabled={empty || pdfState === "working"} title="Download this cutting plan as a PDF">
           {pdfState === "working" ? <Loader2 size={15} className="animate-spin" /> : <FileText size={15} />} {pdfState === "working" ? "Preparing…" : "Download PDF"}
@@ -2925,9 +2998,9 @@ function CuttingPlanModal({ onClose, roomsById, instances, rollWidth, projectNam
         {empty ? (
           <div className="h-full grid place-items-center text-center">
             <div>
-              <div className="w-12 h-12 mx-auto rounded-xl bg-white border border-stone-200 text-stone-400 grid place-items-center mb-3"><Layers size={22} /></div>
+              <div className="w-12 h-12 mx-auto rounded-xl bg-white border border-stone-200 text-stone-500 grid place-items-center mb-3"><Layers size={22} /></div>
               <p className="text-sm font-semibold text-stone-900">Nothing on the carpet yet</p>
-              <p className="text-xs text-stone-500 mt-1">Place some rooms in the cutting layout and your plan will appear here.</p>
+              <p className="text-xs text-stone-600 mt-1">Place some rooms in the cutting layout and your plan will appear here.</p>
             </div>
           </div>
         ) : (
@@ -2973,7 +3046,7 @@ function CuttingPlanModal({ onClose, roomsById, instances, rollWidth, projectNam
                 <p className="text-sm font-semibold text-stone-900 px-4 pt-4 pb-2">Pieces to cut</p>
                 <table className="w-full text-xs">
                   <thead>
-                    <tr className="text-stone-500 text-left border-b border-stone-100">
+                    <tr className="text-stone-600 text-left border-b border-stone-100">
                       <th className="font-medium px-4 py-2">Room</th><th className="font-medium py-2">Size</th><th className="font-medium py-2 pr-4 text-right">Qty</th>
                     </tr>
                   </thead>
@@ -2987,7 +3060,7 @@ function CuttingPlanModal({ onClose, roomsById, instances, rollWidth, projectNam
                           </td>
                           <td className="py-2.5 tabular-nums text-stone-600">
                             {formatLength(room.width, "m")} × {formatLength(room.length, "m")}
-                            <span className="block text-stone-400">{formatArea(room.area)}</span>
+                            <span className="block text-stone-500">{formatArea(room.area)}</span>
                           </td>
                           <td className="py-2.5 pr-4 text-right tabular-nums font-medium text-stone-900">× {count}</td>
                         </tr>
@@ -2997,7 +3070,7 @@ function CuttingPlanModal({ onClose, roomsById, instances, rollWidth, projectNam
                 </table>
               </div>
             </div>
-            <p className="text-[11px] text-stone-400 mt-4 flex items-center gap-1.5"><Info size={12} /> Downloads are rendered in your browser at 2× resolution, so they print sharply.</p>
+            <p className="text-xs text-stone-500 mt-4 flex items-center gap-1.5"><Info size={12} /> Downloads are rendered in your browser at 2× resolution, so they print sharply.</p>
           </>
         )}
       </div>
@@ -3026,6 +3099,7 @@ export default function App() {
   const [selectedId, setSelectedId] = useState(null);
   const [modal, setModal] = useState(null); // { mode: 'add'|'edit', room? }
   const [showCuttingPlan, setShowCuttingPlan] = useState(false);
+  const [showHelp, setShowHelp] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [toast, setToast] = useState(null);
   const [saveState, setSaveState] = useState("saved"); // saved | saving
@@ -3211,7 +3285,7 @@ export default function App() {
     setInstances(next);
     commitHistory(next);
     setSelectedId(null);
-    showToast(`Placed ${added} piece${added > 1 ? "s" : ""} — press Auto arrange to pack them tightly`, "success");
+    showToast(`Placed ${added} piece${added > 1 ? "s" : ""} — press “Arrange for me” to pack them tightly`, "success");
   }
 
   // Keyboard shortcuts: Delete/Backspace removes the selected piece, R
@@ -3220,7 +3294,7 @@ export default function App() {
   useEffect(() => {
     function onKey(e) {
       const tag = (e.target.tagName || "").toLowerCase();
-      if (tag === "input" || tag === "textarea" || tag === "select" || modal || showCuttingPlan) return;
+      if (tag === "input" || tag === "textarea" || tag === "select" || modal || showCuttingPlan || showHelp) return;
       const mod = e.ctrlKey || e.metaKey;
       if (mod && e.key.toLowerCase() === "z") { e.preventDefault(); if (e.shiftKey) redo(); else undo(); return; }
       if (mod && e.key.toLowerCase() === "y") { e.preventDefault(); redo(); return; }
@@ -3231,7 +3305,7 @@ export default function App() {
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [selectedId, view, modal, showCuttingPlan, grainMode]); // eslint-disable-line
+  }, [selectedId, view, modal, showCuttingPlan, showHelp, grainMode]); // eslint-disable-line
 
   useEffect(() => {
     if (!toast) return;
@@ -3306,6 +3380,7 @@ export default function App() {
   }, [rooms, placedByRoom]);
 
   const stats = {
+    projectName, setProjectName,
     rollWidth,
     placed: totals.placed,
     needed: totals.needed,
@@ -3328,7 +3403,7 @@ export default function App() {
 
   if (!loaded) {
     return (
-      <div className="h-screen flex items-center justify-center gap-2 bg-stone-50 text-stone-500 text-sm">
+      <div className="h-screen flex items-center justify-center gap-2 bg-stone-50 text-stone-600 text-sm">
         <Loader2 size={16} className="animate-spin text-brand-500" /> Loading your project…
       </div>
     );
@@ -3337,7 +3412,7 @@ export default function App() {
   return (
     <div className="h-screen supports-[height:100dvh]:h-[100dvh] flex flex-col bg-stone-50 text-stone-800">
       <TopBar
-        projectName={projectName} setProjectName={setProjectName}
+        onOpenHelp={() => setShowHelp(true)}
         onUndo={undo} onRedo={redo} canUndo={historyRef.current.index > 0} canRedo={historyRef.current.index < historyRef.current.stack.length - 1}
         onSave={handleManualSave} saveState={saveState}
         view={view} setView={setView} onOpenCuttingPlan={() => setShowCuttingPlan(true)}
@@ -3376,6 +3451,7 @@ export default function App() {
           onDeleteRoom={handleDeleteRoom} onDuplicateRoom={handleDuplicateRoom} onQuantityChange={handleQuantityChange}
           onPlaceOnCarpet={placeRoomOnCarpet} onPlaceAll={placeAllRemaining} onGoToLayout={() => setView("cutting")}
           settings={settings} totals={totals}
+          projectName={projectName} setProjectName={setProjectName} onOpenHelp={() => setShowHelp(true)}
         />
       )}
 
@@ -3394,6 +3470,7 @@ export default function App() {
           projectName={projectName} reqLength={reqLength} stats={stats}
         />
       )}
+      {showHelp && <HelpModal onClose={() => setShowHelp(false)} />}
       <Toast toast={toast} onDismiss={() => setToast(null)} />
     </div>
   );
