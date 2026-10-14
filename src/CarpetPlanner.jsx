@@ -1894,7 +1894,7 @@ function PlacedBadge({ placed, quantity }) {
     <span className={cls("inline-flex items-center gap-1 text-xs font-medium tabular-nums",
       done ? "text-emerald-700" : placed > 0 ? "text-amber-700" : "text-stone-500")}>
       {done ? <CheckCircle2 size={13} /> : <CircleDashed size={13} />}
-      {placed} of {quantity} on the roll
+      {done ? (quantity > 1 ? `All ${quantity} on the roll` : "On the roll") : `${placed} of ${quantity} on the roll`}
     </span>
   );
 }
@@ -1983,8 +1983,10 @@ function RoomCard({ room, placed, unit, onEdit, onDuplicate, onDelete, onQuantit
             </div>
           ) : (
             <div className="flex items-center gap-1">
-              <Button variant="secondary" size="sm" className="h-9" onClick={() => onPlace(room)} title="Put one of these on the carpet roll"><Layers size={14} /> Put on roll</Button>
-              <IconButton label="Make a copy" onClick={() => onDuplicate(room)} className="ml-auto"><Copy size={16} /></IconButton>
+              {placed < room.quantity && (
+                <Button variant="secondary" size="sm" className="h-9" onClick={() => onPlace(room)} title="Put the missing pieces back on the carpet roll"><Layers size={14} /> Put back on roll</Button>
+              )}
+              <IconButton label="Make a copy of this room" onClick={() => onDuplicate(room)} className="ml-auto"><Copy size={16} /></IconButton>
               <IconButton label="Delete room" onClick={() => setConfirmDelete(true)} className="hover:!text-red-600 hover:!bg-red-50"><Trash2 size={16} /></IconButton>
             </div>
           )}
@@ -2006,10 +2008,9 @@ function AddRoomTile({ onAddRoom }) {
   );
 }
 
-function RoomsView({ projectName, setProjectName, onOpenHelp, rooms, placedByRoom, unit, onAddRoom, onEditRoom, onDeleteRoom, onDuplicateRoom, onQuantityChange, onPlaceOnCarpet, onPlaceAll, onGoToLayout, settings, totals }) {
+function RoomsView({ lengthLabel, projectName, setProjectName, onOpenHelp, rooms, placedByRoom, unit, onAddRoom, onEditRoom, onDeleteRoom, onDuplicateRoom, onQuantityChange, onPlaceOnCarpet, onPlaceAll, onGoToLayout, settings, totals }) {
   if (rooms.length === 0) return <EmptyRooms onAddRoom={onAddRoom} onOpenHelp={onOpenHelp} />;
   const remaining = totals.needed - totals.placed;
-  const pct = totals.needed ? Math.min(100, (totals.placed / totals.needed) * 100) : 0;
   return (
     <div className="flex-1 min-h-0 overflow-y-auto">
       <div className="max-w-[1320px] mx-auto px-4 sm:px-8 pt-6 pb-16 grid lg:grid-cols-[minmax(0,1fr)_340px] gap-8 lg:gap-10">
@@ -2023,7 +2024,7 @@ function RoomsView({ projectName, setProjectName, onOpenHelp, rooms, placedByRoo
               <RoomCard
                 key={room.id} room={room} placed={placedByRoom[room.id] || 0} unit={unit}
                 onEdit={() => onEditRoom(room)} onDuplicate={onDuplicateRoom} onDelete={onDeleteRoom}
-                onQuantityChange={onQuantityChange} onPlace={onPlaceOnCarpet}
+                onQuantityChange={onQuantityChange} onPlace={() => onPlaceAll(true)}
               />
             ))}
           </div>
@@ -2033,16 +2034,22 @@ function RoomsView({ projectName, setProjectName, onOpenHelp, rooms, placedByRoo
           <section className="rounded-2xl bg-ink-900 text-white p-5">
             <p className="font-display text-xs font-semibold uppercase tracking-[0.22em] text-stone-400">Next</p>
             <p className="text-lg font-semibold mt-1">Plan the cut</p>
-            <div className="mt-4 h-1.5 rounded-full bg-white/10 overflow-hidden">
-              <div className="h-full bg-brand-500 rounded-full transition-all duration-500" style={{ width: `${pct}%` }} />
-            </div>
-            <p className="text-sm text-stone-300 mt-2 tabular-nums">{totals.placed} of {totals.needed} pieces on the roll</p>
-            <div className="flex flex-col gap-2 mt-5">
-              {remaining > 0 && <Button variant="primary" className="w-full h-11" onClick={onPlaceAll}>Put all {remaining} on the roll <ArrowRight size={16} /></Button>}
-              <Button variant="ghost" className={cls("w-full h-11 !text-white hover:!bg-white/10", remaining > 0 ? "" : "!bg-brand-600 hover:!bg-brand-700")} onClick={onGoToLayout}>
-                {remaining > 0 ? "Just open the plan" : <>Open the plan <ArrowRight size={16} /></>}
-              </Button>
-            </div>
+            <dl className="mt-4 grid grid-cols-2 gap-3">
+              <div>
+                <dt className="text-xs text-stone-400">On the roll</dt>
+                <dd className="text-xl font-semibold tabular-nums mt-0.5">{totals.placed} <span className="text-sm font-normal text-stone-400">{totals.placed === 1 ? "piece" : "pieces"}</span></dd>
+              </div>
+              <div>
+                <dt className="text-xs text-stone-400">Carpet needed</dt>
+                <dd className="text-xl font-semibold tabular-nums mt-0.5">{lengthLabel}</dd>
+              </div>
+            </dl>
+            {remaining > 0 && (
+              <button type="button" onClick={() => onPlaceAll(true)} className={cls("mt-3 text-sm text-stone-300 underline decoration-white/30 underline-offset-4 hover:text-white", FOCUS_RING)}>
+                Put the other {remaining} back on the roll
+              </button>
+            )}
+            <Button variant="primary" className="w-full h-11 mt-5" onClick={onGoToLayout}>Open the plan <ArrowRight size={16} /></Button>
           </section>
           <section className={cls(CARD, "p-5")}>
             <h2 className="text-base font-semibold text-stone-900 mb-4">Carpet roll</h2>
@@ -3234,14 +3241,35 @@ export default function App() {
     showToast("Project saved", "success");
   }
 
+  // Rooms go straight onto the roll: a room always has as many pieces on the
+  // roll as its "How many" says. Missing pieces are added in clear space
+  // below the layout (always valid); extra ones (newest first) are removed.
+  function syncRoomPieces(room, roomsByIdNext) {
+    const mine = instances.filter((i) => i.roomId === room.id);
+    const want = Math.max(1, room.quantity || 1);
+    let next = instances;
+    if (mine.length > want) {
+      const drop = new Set(mine.slice(want).map((i) => i.id));
+      next = instances.filter((i) => !drop.has(i.id));
+    } else if (mine.length < want) {
+      next = [...instances];
+      for (let k = mine.length; k < want; k++) {
+        const y = requiredLength(next, roomsByIdNext) + (next.length ? tolerance + 60 : 0);
+        next.push(newInstanceFor(room, 0, y));
+      }
+    }
+    if (next !== instances) { setInstances(next); commitHistory(next); }
+  }
+
   function handleSaveRoom(roomData) {
     const isNew = !rooms.some((r) => r.id === roomData.id);
     setRooms((prev) => {
       const exists = prev.some((r) => r.id === roomData.id);
       return exists ? prev.map((r) => (r.id === roomData.id ? roomData : r)) : [...prev, roomData];
     });
+    syncRoomPieces(roomData, { ...roomsById, [roomData.id]: roomData });
     setModal(null);
-    showToast(isNew ? `“${roomData.name}” added` : `“${roomData.name}” updated`, "success");
+    showToast(isNew ? `“${roomData.name}” added to the roll` : `“${roomData.name}” updated`, "success");
   }
 
   function handleDeleteRoom(id) {
@@ -3256,10 +3284,15 @@ export default function App() {
   function handleDuplicateRoom(room) {
     const copy = { ...room, id: `room_${Date.now()}`, name: room.name + " copy" };
     setRooms((prev) => [...prev, copy]);
+    syncRoomPieces(copy, { ...roomsById, [copy.id]: copy });
   }
 
   function handleQuantityChange(id, qty) {
-    setRooms((prev) => prev.map((r) => (r.id === id ? { ...r, quantity: qty } : r)));
+    const room = roomsById[id];
+    if (!room) return;
+    const updated = { ...room, quantity: qty };
+    setRooms((prev) => prev.map((r) => (r.id === id ? updated : r)));
+    syncRoomPieces(updated, { ...roomsById, [id]: updated });
   }
 
   function rotateSelected() {
@@ -3328,7 +3361,9 @@ export default function App() {
 
   // Places every copy still needed (quantity minus what's already on the
   // carpet) for every room, stacked in clear space below the current layout.
-  function placeAllRemaining() {
+  // stayHere === true keeps the current page (used by "Put back" on the rooms page);
+  // buttons that pass a click event still open the plan.
+  function placeAllRemaining(stayHere) {
     let next = [...instances];
     let added = 0;
     rooms.forEach((room) => {
@@ -3339,7 +3374,7 @@ export default function App() {
         added++;
       }
     });
-    setView("cutting");
+    if (stayHere !== true) setView("cutting");
     if (!added) { showToast("Every room is already on the carpet"); return; }
     setInstances(next);
     commitHistory(next);
@@ -3510,7 +3545,7 @@ export default function App() {
           onAddRoom={openAddRoom} onEditRoom={openEditRoom}
           onDeleteRoom={handleDeleteRoom} onDuplicateRoom={handleDuplicateRoom} onQuantityChange={handleQuantityChange}
           onPlaceOnCarpet={placeRoomOnCarpet} onPlaceAll={placeAllRemaining} onGoToLayout={() => setView("cutting")}
-          settings={settings} totals={totals}
+          settings={settings} totals={totals} lengthLabel={stats.lengthLabel}
           projectName={projectName} setProjectName={setProjectName} onOpenHelp={() => setShowHelp(true)}
         />
       )}
