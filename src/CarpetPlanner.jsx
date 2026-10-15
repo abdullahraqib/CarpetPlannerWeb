@@ -1021,12 +1021,14 @@ function parseLength(input, defaultUnit) {
   if (/^[0-9.]+$/.test(str)) {
     const v = parseFloat(str);
     if (isNaN(v)) return null;
-    return defaultUnit === "m" ? v * 1000 : defaultUnit === "cm" ? v * 10 : defaultUnit === "ft" ? v * MM_PER_FOOT : v;
+    if (defaultUnit === "ft") return ceilToCm(v * MM_PER_FOOT);
+    return defaultUnit === "m" ? v * 1000 : defaultUnit === "cm" ? v * 10 : v;
   }
   const tokenRe = /([0-9]*\.?[0-9]+)\s*(mm|cm|m|feet|foot|ft|'|inches|inch|in|")/g;
-  let match, total = 0, found = false;
+  let match, total = 0, found = false, imperial = false;
   while ((match = tokenRe.exec(str)) !== null) {
     found = true;
+    if (!["m", "cm", "mm"].includes(match[2])) imperial = true;
     const v = parseFloat(match[1]);
     const unit = match[2];
     if (unit === "m") total += v * 1000;
@@ -1035,8 +1037,14 @@ function parseLength(input, defaultUnit) {
     else if (unit === "feet" || unit === "foot" || unit === "ft" || unit === "'") total += v * MM_PER_FOOT;
     else total += v * MM_PER_INCH;
   }
-  return found ? total : null;
+  if (!found) return null;
+  return imperial ? ceilToCm(total) : total;
 }
+
+// Feet/inches always round UP to the next centimetre (2 d.p. in metres), so
+// a converted size is never smaller than the real wall. The epsilon stops
+// float noise (e.g. 3000.0000001) bumping an exact value up a whole cm.
+function ceilToCm(mm) { return Math.ceil(mm / 10 - 1e-9) * 10; }
 
 // 3048 -> 10′ 0″ (inches to the nearest half inch). Only used while entering sizes.
 function formatFtIn(mm) {
