@@ -1072,6 +1072,48 @@ function splitRoomForJoin(room, rollWidth, tolerance, grainMode) {
   return [...done, ...pending];
 }
 
+// Every sensible way to split an oversize room for a join: straight cuts
+// across one axis, either into equal strips or the usual fitting practice of
+// full roll-width drops plus one narrow fill strip (at either end), which can
+// often tuck in beside other pieces. Each candidate is a list of parts that
+// all fit the roll. The plain equal split above is always included.
+const MIN_JOIN_STRIP = 100; // mm — ponytail: narrower fill strips are rejected as unfittable slivers; make it a setting if fitters want thinner
+function joinSplitCandidates(room, rollWidth, tolerance, grainMode) {
+  const usable = rollWidth - tolerance;
+  const transpose = (verts) => verts.map((v) => ({ x: v.y, y: v.x }));
+  const fits = (verts) => !isOversizeRoom({ vertices: verts }, rollWidth, tolerance, grainMode);
+  const out = [], seen = new Set();
+  const push = (parts) => {
+    if (parts.length < 2 || !parts.every(fits)) return;
+    if (parts.some((p) => { const bb = boundingBox(p); return Math.min(bb.maxX - bb.minX, bb.maxY - bb.minY) < MIN_JOIN_STRIP; })) return;
+    const key = parts.map((p) => JSON.stringify(p)).sort().join("|");
+    if (!seen.has(key)) { seen.add(key); out.push(parts); }
+  };
+  // Locked grain: only cut across x (the parts can't be turned).
+  for (const alongY of grainMode === "locked" ? [false] : [false, true]) {
+    const work = alongY ? transpose(room.vertices) : room.vertices;
+    const bb = boundingBox(work);
+    const extent = bb.maxX - bb.minX;
+    if (extent <= usable + EPS) continue;
+    const k = Math.ceil(extent / usable);
+    const cutSets = [
+      Array.from({ length: k - 1 }, (_, i) => (extent * (i + 1)) / k), // equal strips
+      Array.from({ length: k - 1 }, (_, i) => usable * (i + 1)), // full widths, fill strip last
+      Array.from({ length: k - 1 }, (_, i) => extent - usable * (k - 1 - i)), // fill strip first
+    ];
+    for (const cuts of cutSets) {
+      const edges = [bb.minX, ...cuts.map((c) => bb.minX + c), bb.maxX];
+      const parts = [];
+      for (let i = 0; i < edges.length - 1; i++) {
+        clipPolygonToStrip(work, edges[i], edges[i + 1]).forEach((p) => parts.push(alongY ? transpose(p) : p));
+      }
+      push(parts);
+    }
+  }
+  push(splitRoomForJoin(room, rollWidth, tolerance, grainMode));
+  return out;
+}
+
 // Directions + wall lengths for a rectilinear polygon (editor format).
 function polygonToWalls(vertices) {
   const directions = [], wallLengths = [];
@@ -3538,11 +3580,39 @@ export default function App() {
   // (library and canvas), then Auto Arrange runs. The original is kept on
   // each part as `joinOf` so the join can be undone.
   const [pendingArrange, setPendingArrange] = useState(false);
+  // Where the join goes matters: each candidate split is test-packed with
+  // everything else on the roll (a quick, reduced-budget search) and the one
+  // needing the least carpet wins; fewer joins breaks a tie. The full Auto
+  // Arrange then runs on the chosen split.
+  const JOIN_TRIAL_BUDGET = 0.15; // ponytail: quick SA pass per candidate, so a close call between two splits can flip run to run
   function handlePlanWithJoin(roomId) {
     const room = roomsById[roomId];
     if (!room) return;
-    const parts = splitRoomForJoin(room, rollWidth, tolerance, grainMode);
-    if (parts.length < 2) { showToast("Couldn't split this room into narrower pieces", "warn"); return; }
+    setArranging(true);
+    setTimeout(() => {
+      const candidates = joinSplitCandidates(room, rollWidth, tolerance, grainMode);
+      if (!candidates.length) { setArranging(false); showToast("Couldn't split this room into narrower pieces", "warn"); return; }
+      const others = instances.filter((i) => i.roomId !== roomId);
+      const copies = Math.max(1, instances.filter((i) => i.roomId === roomId).length);
+      let best = null;
+      candidates.forEach((parts) => {
+        const trialRooms = { ...roomsById };
+        const trial = [...others];
+        parts.forEach((verts, idx) => {
+          const id = `__join_trial_${idx}`;
+          trialRooms[id] = { ...room, id, vertices: verts };
+          for (let c = 0; c < copies; c++) trial.push({ id: `${id}_${c}`, roomId: id, rotation: 0, x: 0, y: 0, allowanceOverride: null });
+        });
+        const packable = trial.filter((i) => !isOversizeRoom(trialRooms[i.roomId], rollWidth, tolerance, grainMode));
+        const len = requiredLength(autoArrangeOnce(packable, trialRooms, rollWidth, tolerance, grainMode, guillotineMode, JOIN_TRIAL_BUDGET, false), trialRooms);
+        if (!best || len < best.len - EPS || (Math.abs(len - best.len) <= EPS && parts.length < best.parts.length)) best = { parts, len };
+      });
+      applyJoin(room, best.parts);
+    }, 10);
+  }
+
+  function applyJoin(room, parts) {
+    const roomId = room.id;
     const stamp = Date.now();
     const partRooms = parts.map((verts, idx) => {
       const bb = boundingBox(verts);
