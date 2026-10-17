@@ -1485,7 +1485,6 @@ function AddRoomModal({ initialRoom, onClose, onSave, displayUnit }) {
 
 function LeftSidebar({ rooms, onAddRoom, onEditRoom, onDeleteRoom, onDuplicateRoom, onQuantityChange, onPlaceOnCarpet, rollWidth, setRollWidth, unit, setUnit, tolerance, setTolerance, grainMode, setGrainMode, gridSize, setGridSize, snapEnabled, setSnapEnabled, allowOverlap, setAllowOverlap, guillotineMode, setGuillotineMode }) {
   const [tab, setTab] = useState("rooms");
-  const [showAdvanced, setShowAdvanced] = useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
 
   // The roll-width field keeps its own text buffer, separate from the
@@ -1599,15 +1598,9 @@ function LeftSidebar({ rooms, onAddRoom, onEditRoom, onDeleteRoom, onDuplicateRo
             </select>
           </Field>
 
-          <button
-            onClick={() => setShowAdvanced((s) => !s)}
-            className="w-full flex items-center justify-between text-xs font-medium text-stone-500 hover:text-stone-700 pt-2 border-t border-stone-200"
-          >
-            <span>More settings</span>
-            {showAdvanced ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-          </button>
+          <div className="pt-2 border-t border-stone-200" />
 
-          {showAdvanced && (
+          {(
             <div className="space-y-4 pt-1">
               <Field label="Extra allowance around each piece">
                 <select value={tolerance} onChange={(e) => setTolerance(parseInt(e.target.value))} className="w-full border border-stone-300 rounded-xl px-3 py-2 text-sm bg-white">
@@ -2609,6 +2602,13 @@ export default function App() {
     return () => clearTimeout(t);
   }, [arrangeNote]);
 
+  // Always read the settings as they are when the timer fires, never a
+  // stale render's closure.
+  const settingsRef = useRef({});
+  settingsRef.current = { rollWidth, tolerance, grainMode, guillotineMode };
+  // Whether the plan on the canvas was last produced in guillotine mode.
+  const lastArrangedGuillotine = useRef(false);
+
   function runAutoArrange() {
     setArranging(true);
     setArrangeNote(null);
@@ -2626,9 +2626,26 @@ export default function App() {
         // the same as, or even shorter than, any valid rearrangement. So
         // validity is checked FIRST, before any length comparison — a
         // short layout that can't actually be cut is never "efficient".
+        const { rollWidth, tolerance, grainMode, guillotineMode } = settingsRef.current;
         const currentInvalid = layoutHasCollisions(prev, roomsById, rollWidth, tolerance);
+        // Settings may have changed since the plan was made: a rotation the
+        // current setting no longer permits, or guillotine mode switched on
+        // for a plan that wasn't built that way, makes the plan
+        // non-compliant — so it must be replaced even if it measures shorter.
+        const breaksRotation = grainMode === "locked"
+          ? prev.some((i) => ((i.rotation || 0) % 360) !== 0)
+          : grainMode === "90"
+            ? prev.some((i) => ((i.rotation || 0) % 90) !== 0)
+            : false;
+        const breaksGuillotine = guillotineMode && !lastArrangedGuillotine.current;
         const next = autoArrange(prev, roomsById, rollWidth, tolerance, grainMode, guillotineMode);
         const nextLen = requiredLength(next, roomsById);
+        lastArrangedGuillotine.current = guillotineMode;
+        if (breaksRotation || breaksGuillotine) {
+          commitHistory(next);
+          setArrangeNote("Plan rebuilt to match your current settings");
+          return next;
+        }
         if (currentInvalid) {
           commitHistory(next);
           setArrangeNote(nextLen < currentLen - EPS
