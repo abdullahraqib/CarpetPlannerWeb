@@ -1240,6 +1240,38 @@ function formatLength(mm, unit) {
 
 function formatArea(mm2) { return (mm2 / 1_000_000).toFixed(2) + "m\u00B2"; }
 
+/* Gripper rod: grippers = round up( perimeter metres / 1.5 + steps ).
+   - every room's whole perimeter, once per copy ("How many")
+   - a room split for a join counts its ORIGINAL outline once (no gripper
+     along the seam between its parts)
+   - stairs rooms add 1 gripper per step ("How many" = steps) and nothing
+     for their edges
+   Total-metres method: assumes offcuts are reused on other walls. */
+const GRIPPER_LENGTH_MM = 1500;
+function polygonPerimeter(vertices) {
+  let p = 0;
+  for (let i = 0; i < vertices.length; i++) {
+    const a = vertices[i], b = vertices[(i + 1) % vertices.length];
+    p += Math.abs(b.x - a.x) + Math.abs(b.y - a.y);
+  }
+  return p;
+}
+function gripperCount(rooms) {
+  let perimeterMm = 0, steps = 0;
+  const counted = new Set();
+  for (const r of rooms) {
+    const src = r.joinOf || r;
+    if (counted.has(src.id)) continue;
+    counted.add(src.id);
+    const qty = Math.max(1, r.quantity || 1);
+    if (src.isStairs) steps += qty;
+    else perimeterMm += polygonPerimeter(src.vertices) * qty;
+  }
+  // epsilon: an exact multiple of 1.5m (e.g. 18m) must not tip up to the next gripper
+  const grippers = Math.ceil(perimeterMm / GRIPPER_LENGTH_MM - 1e-9) + steps;
+  return { perimeterMm, steps, grippers };
+}
+
 const DIR_ICON = { R: ArrowRight, L: ArrowLeft, U: ArrowUp, D: ArrowDown };
 const ROOM_COLORS = ["#c98a3a", "#d93732", "#8a5fb0", "#4a7fb5", "#b5583f", "#5a8a4a", "#a3843f", "#7a5a8a"];
 
@@ -1583,6 +1615,7 @@ function AddRoomModal({ initialRoom, initialTemplate, onClose, onSave, displayUn
   // Stored in mm, entered in cm.
   const [allowance, setAllowance] = useState(initialRoom?.cuttingAllowance != null ? String(initialRoom.cuttingAllowance / 10) : "");
   const [grain, setGrain] = useState(initialRoom?.grainDirection ?? false);
+  const [isStairs, setIsStairs] = useState(initialRoom?.isStairs ?? false);
   const svgRef = useRef(null);
   const wallInputs = useRef([]);
   const inchInputs = useRef([]);
@@ -1757,6 +1790,7 @@ function AddRoomModal({ initialRoom, initialTemplate, onClose, onSave, displayUn
       notes,
       cuttingAllowance: allowance === "" || !isFinite(allowanceCm) ? null : allowanceCm * 10,
       grainDirection: grain,
+      isStairs,
       color: initialRoom?.color || ROOM_COLORS[Math.floor(Math.random() * ROOM_COLORS.length)],
     }, unit);
   }
@@ -1995,7 +2029,7 @@ function AddRoomModal({ initialRoom, initialTemplate, onClose, onSave, displayUn
                   />
                 </Field>
                 <div className="grid grid-cols-2 gap-4">
-                  <Field label="How many?" hint="Identical pieces to cut">
+                  <Field label={isStairs ? "How many steps?" : "How many?"} hint={isStairs ? "One piece and one gripper per step" : "Identical pieces to cut"}>
                     <QtyStepper value={Math.max(1, parseInt(quantity) || 1)} onChange={setQuantity} />
                   </Field>
                   <Field label="Cutting allowance" hint="Leave blank to use the roll default">
@@ -2008,6 +2042,7 @@ function AddRoomModal({ initialRoom, initialTemplate, onClose, onSave, displayUn
                 <Field label="Notes (optional)">
                   <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={2} placeholder="Doorway, underlay, fitting notes…" className={INPUT + " h-auto py-2 resize-none"} />
                 </Field>
+                <Toggle checked={isStairs} onChange={setIsStairs} label="This is stairs" description="Each step gets one full gripper instead of gripper around the edges." />
                 <Toggle checked={grain} onChange={setGrain} label="Show pile direction" description="Draws an arrow on this room in the cutting layout so the pile runs the right way." />
               </div>
               {previewVerts && (
@@ -2228,7 +2263,7 @@ function RoomCard({ room, placed, unit, onUndoJoin, onEdit, onDuplicate, onDelet
         )}
 
         <div className="flex items-center justify-between mt-4">
-          <span className="text-sm text-stone-700">How many</span>
+          <span className="text-sm text-stone-700">{room.isStairs ? "Steps" : "How many"}</span>
           <QtyStepper value={room.quantity} onChange={(q) => onQuantityChange(room.id, q)} />
         </div>
         <div className="mt-2"><PlacedBadge placed={placed} quantity={room.quantity} /></div>
@@ -2267,7 +2302,7 @@ function AddRoomTile({ onAddRoom }) {
   );
 }
 
-function RoomsView({ onUndoJoin, lengthLabel, projectName, setProjectName, onOpenHelp, rooms, placedByRoom, unit, onAddRoom, onEditRoom, onDeleteRoom, onDuplicateRoom, onQuantityChange, onPlaceOnCarpet, onPlaceAll, onGoToLayout, settings, totals }) {
+function RoomsView({ grippers, gripperSub, onUndoJoin, lengthLabel, projectName, setProjectName, onOpenHelp, rooms, placedByRoom, unit, onAddRoom, onEditRoom, onDeleteRoom, onDuplicateRoom, onQuantityChange, onPlaceOnCarpet, onPlaceAll, onGoToLayout, settings, totals }) {
   if (rooms.length === 0) return <EmptyRooms onAddRoom={onAddRoom} onOpenHelp={onOpenHelp} />;
   const remaining = totals.needed - totals.placed;
   return (
@@ -2301,6 +2336,10 @@ function RoomsView({ onUndoJoin, lengthLabel, projectName, setProjectName, onOpe
               <div>
                 <dt className="text-xs text-stone-400">Carpet needed</dt>
                 <dd className="text-xl font-semibold tabular-nums mt-0.5">{lengthLabel}</dd>
+              </div>
+              <div className="col-span-2 pt-3 border-t border-white/10">
+                <dt className="text-xs text-stone-400">Grippers needed</dt>
+                <dd className="text-xl font-semibold tabular-nums mt-0.5">{grippers} <span className="text-sm font-normal text-stone-400">{gripperSub}</span></dd>
               </div>
             </dl>
             {remaining > 0 && (
@@ -2478,6 +2517,7 @@ function LayoutSidebar({ selectedInstance, selectedRoom, inspectorProps, stats, 
               <StatTile label="Pieces placed" value={`${stats.placed}/${stats.needed}`} sub={stats.placed < stats.needed ? `${stats.needed - stats.placed} to go` : "All placed"} />
               <StatTile label="Carpet used" value={stats.usedLabel} sub={`of ${stats.areaLabel}`} />
               <StatTile label="Offcut waste" value={stats.wastePctLabel} sub={stats.wasteLabel} />
+              <div className="col-span-2"><StatTile label="Grippers needed (1.5m each)" value={stats.grippers} sub={stats.gripperSub} /></div>
             </div>
             <p className="text-xs text-stone-500 mt-3 flex items-start gap-1.5 leading-snug"><MousePointerClick size={13} className="shrink-0 mt-px" /> Click a piece on the roll to rotate, duplicate or remove it.</p>
           </div>
@@ -3136,7 +3176,7 @@ function loadPlanLogo() {
   return planLogoPromise;
 }
 
-function renderPlanCanvas({ instances, roomsById, rollWidth, reqLength, projectName, pxPerMm, headerH, scale, logo }) {
+function renderPlanCanvas({ instances, roomsById, rollWidth, reqLength, projectName, pxPerMm, headerH, scale, logo, grippers }) {
   const svgW = rollWidth * pxPerMm + 20;
   const svgH = reqLength * pxPerMm + 20 + headerH;
   const canvas = document.createElement("canvas");
@@ -3159,7 +3199,7 @@ function renderPlanCanvas({ instances, roomsById, rollWidth, reqLength, projectN
   ctx.fillStyle = "#78716c";
   ctx.font = "9.5px monospace";
   ctx.fillText(
-    `Roll ${(rollWidth / 1000).toFixed(2)}m wide \u00B7 Required length ${(reqLength / 1000).toFixed(2)}m \u00B7 ${instances.length} piece(s) \u00B7 ${new Date().toLocaleDateString()}`,
+    `Roll ${(rollWidth / 1000).toFixed(2)}m wide \u00B7 Required length ${(reqLength / 1000).toFixed(2)}m \u00B7 ${instances.length} piece(s) \u00B7 ${grippers} gripper(s) \u00B7 ${new Date().toLocaleDateString()}`,
     10, 60
   );
 
@@ -3279,7 +3319,7 @@ function CuttingPlanModal({ onClose, roomsById, instances, rollWidth, projectNam
     setExportState("working");
     try {
       const logo = await loadPlanLogo();
-      const canvas = renderPlanCanvas({ instances, roomsById, rollWidth, reqLength, projectName, pxPerMm, headerH, scale: 2, logo });
+      const canvas = renderPlanCanvas({ instances, roomsById, rollWidth, reqLength, projectName, pxPerMm, headerH, scale: 2, logo, grippers: stats.grippers });
       canvas.toBlob((blob) => {
         if (!blob) { setExportState("error"); return; }
         downloadBlob(blob, `${safeFileName(projectName)}.png`);
@@ -3295,7 +3335,7 @@ function CuttingPlanModal({ onClose, roomsById, instances, rollWidth, projectNam
     try {
       const scale = 2;
       const logo = await loadPlanLogo();
-      const canvas = renderPlanCanvas({ instances, roomsById, rollWidth, reqLength, projectName, pxPerMm, headerH, scale, logo });
+      const canvas = renderPlanCanvas({ instances, roomsById, rollWidth, reqLength, projectName, pxPerMm, headerH, scale, logo, grippers: stats.grippers });
       const jpegDataUrl = canvas.toDataURL("image/jpeg", 0.92);
       const jpegBytes = base64ToUint8Array(jpegDataUrl.split(",")[1]);
       const pdfBytes = buildSinglePageImagePDF(jpegBytes, canvas.width, canvas.height, svgW, svgH);
@@ -3348,11 +3388,12 @@ function CuttingPlanModal({ onClose, roomsById, instances, rollWidth, projectNam
           </div>
         ) : (
           <>
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 mb-5">
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5 mb-5">
               <StatTile label="Roll width" value={`${(rollWidth / 1000).toFixed(2)}m`} />
               <StatTile label="Length to buy" value={`${(reqLength / 1000).toFixed(2)}m`} tone="accent" />
               <StatTile label="Pieces" value={instances.length} />
               <StatTile label="Waste" value={stats.wastePctLabel} sub={stats.wasteLabel} />
+              <StatTile label="Grippers" value={stats.grippers} sub={stats.gripperSub} />
             </div>
             <div className="grid xl:grid-cols-[minmax(0,1fr)_300px] gap-5 items-start">
               <div className="bg-white border border-stone-200 rounded-xl p-3 overflow-auto shadow-sm">
@@ -3361,7 +3402,7 @@ function CuttingPlanModal({ onClose, roomsById, instances, rollWidth, projectNam
                   <image href={PLAN_LOGO_SRC} x={10} y={8} height={PLAN_LOGO_H} preserveAspectRatio="xMinYMid meet" width={Math.max(0, svgW - 20)} />
                   <text x={10} y={46} fontSize="13" fontWeight="bold" fontFamily="Inter, ui-sans-serif, system-ui, sans-serif" fill="#1c1a18">{projectName} — Cutting Plan</text>
                   <text x={10} y={60} fontSize="9.5" fontFamily="ui-monospace, monospace" fill="#78716c">
-                    {`Roll ${(rollWidth / 1000).toFixed(2)}m wide · Required length ${(reqLength / 1000).toFixed(2)}m · ${instances.length} piece(s) · ${new Date().toLocaleDateString()}`}
+                    {`Roll ${(rollWidth / 1000).toFixed(2)}m wide · Required length ${(reqLength / 1000).toFixed(2)}m · ${instances.length} piece(s) · ${stats.grippers} gripper(s) · ${new Date().toLocaleDateString()}`}
                   </text>
                   <g transform={`translate(10,${headerH + 10})`}>
                     <rect x={0} y={0} width={rollWidth * pxPerMm} height={reqLength * pxPerMm} fill="#fafaf7" stroke="#333" />
@@ -3878,8 +3919,11 @@ export default function App() {
     return { needed, placed, remaining };
   }, [rooms, placedByRoom]);
 
+  const gripper = useMemo(() => gripperCount(rooms), [rooms]);
   const stats = {
     projectName, setProjectName,
+    grippers: gripper.grippers,
+    gripperSub: [gripper.perimeterMm > 0 && `${(gripper.perimeterMm / 1000).toFixed(2)}m edges`, gripper.steps > 0 && `${gripper.steps} step${gripper.steps === 1 ? "" : "s"}`].filter(Boolean).join(" + ") || "No rooms yet",
     rollWidth,
     placed: totals.placed,
     needed: totals.needed,
@@ -3951,7 +3995,7 @@ export default function App() {
           onAddRoom={openAddRoom} onEditRoom={openEditRoom}
           onDeleteRoom={handleDeleteRoom} onDuplicateRoom={handleDuplicateRoom} onQuantityChange={handleQuantityChange}
           onPlaceOnCarpet={placeRoomOnCarpet} onPlaceAll={placeAllRemaining} onGoToLayout={() => setView("cutting")}
-          settings={settings} totals={totals} lengthLabel={stats.lengthLabel} onUndoJoin={handleUndoJoin}
+          settings={settings} totals={totals} lengthLabel={stats.lengthLabel} grippers={stats.grippers} gripperSub={stats.gripperSub} onUndoJoin={handleUndoJoin}
           projectName={projectName} setProjectName={setProjectName} onOpenHelp={() => setShowHelp(true)}
         />
       )}
