@@ -971,6 +971,137 @@ function autoArrangeOnce(instanceList, roomsById, rollWidth, tolerance, grainMod
   return compactLayout(best, roomsById, rollWidth, tolerance);
 }
 
+
+/* ----------------------------------------------------------------------
+   Oversize pieces + joins. A room can be wider than the roll in every
+   rotation Auto Arrange is allowed to use. Such a piece is never dropped:
+   it stays on the canvas, flagged, and can be split into narrower pieces
+   that are sewn/taped together ("a join").
+   ---------------------------------------------------------------------- */
+
+function isOversizeRoom(room, rollWidth, tolerance, grainMode) {
+  if (!room) return false;
+  const usable = rollWidth - tolerance;
+  return !allowedRotationsFor(grainMode).some((rot) => {
+    const bb = boundingBox(rotatePolygon(room.vertices, rot));
+    return bb.maxX - bb.minX <= usable + EPS;
+  });
+}
+
+// Rotation that gives the narrowest width — where a flagged piece rests.
+function narrowestRotation(room, grainMode) {
+  let best = 0, bestW = Infinity;
+  for (const rot of allowedRotationsFor(grainMode)) {
+    const bb = boundingBox(rotatePolygon(room.vertices, rot));
+    if (bb.maxX - bb.minX < bestW) { bestW = bb.maxX - bb.minX; best = rot; }
+  }
+  return best;
+}
+
+// Portion of a rectilinear polygon inside the strip a <= x <= b, as a list
+// of normalised polygons (a strip can cut a U-shape into several parts).
+function clipPolygonToStrip(vertices, a, b) {
+  const xs = [...new Set([...vertices.map((v) => v.x).filter((x) => x > a + EPS && x < b - EPS), a, b])].sort((p, q) => p - q);
+  const ys = [...new Set(vertices.map((v) => v.y))].sort((p, q) => p - q);
+  const filled = (i, j) => i >= 0 && j >= 0 && i < xs.length - 1 && j < ys.length - 1
+    && pointInPolygon((xs[i] + xs[i + 1]) / 2, (ys[j] + ys[j + 1]) / 2, vertices);
+  // Directed boundary edges, filled cell on the left of travel.
+  const edges = new Map();
+  const add = (x0, y0, x1, y1) => { const k = `${x0},${y0}`; if (!edges.has(k)) edges.set(k, []); edges.get(k).push({ x: x1, y: y1 }); };
+  for (let i = 0; i < xs.length - 1; i++) for (let j = 0; j < ys.length - 1; j++) {
+    if (!filled(i, j)) continue;
+    if (!filled(i, j - 1)) add(xs[i], ys[j], xs[i + 1], ys[j]);
+    if (!filled(i + 1, j)) add(xs[i + 1], ys[j], xs[i + 1], ys[j + 1]);
+    if (!filled(i, j + 1)) add(xs[i + 1], ys[j + 1], xs[i], ys[j + 1]);
+    if (!filled(i - 1, j)) add(xs[i], ys[j + 1], xs[i], ys[j]);
+  }
+  const loops = [];
+  for (const [startKey] of edges) {
+    while (edges.get(startKey) && edges.get(startKey).length) {
+      const [sx, sy] = startKey.split(",").map(Number);
+      const pts = [{ x: sx, y: sy }];
+      let cur = { x: sx, y: sy };
+      for (let guard = 0; guard < 10000; guard++) {
+        const out = edges.get(`${cur.x},${cur.y}`);
+        if (!out || !out.length) break;
+        const nxt = out.shift();
+        if (nxt.x === sx && nxt.y === sy) break;
+        pts.push(nxt); cur = nxt;
+      }
+      // drop collinear points
+      const simple = pts.filter((pt, k) => {
+        const prev = pts[(k + pts.length - 1) % pts.length], next = pts[(k + 1) % pts.length];
+        return !((prev.x === pt.x && pt.x === next.x) || (prev.y === pt.y && pt.y === next.y));
+      });
+      if (simple.length >= 4 && polygonArea(simple) > 1) loops.push(simple);
+    }
+  }
+  return loops.map((loop) => {
+    const bb = boundingBox(loop);
+    return loop.map((v) => ({ x: v.x - bb.minX, y: v.y - bb.minY }));
+  });
+}
+
+// Split a room into pieces that each fit the roll (in some allowed
+// rotation), cutting straight across the long way. Returns a list of
+// vertex arrays.
+function splitRoomForJoin(room, rollWidth, tolerance, grainMode) {
+  const usable = rollWidth - tolerance;
+  const canTurn = grainMode !== "locked";
+  const fits = (verts) => !isOversizeRoom({ vertices: verts }, rollWidth, tolerance, grainMode);
+  const transpose = (verts) => verts.map((v) => ({ x: v.y, y: v.x }));
+  let pending = [room.vertices], done = [];
+  for (let round = 0; round < 8 && pending.length; round++) {
+    const next = [];
+    for (const verts of pending) {
+      if (fits(verts)) { done.push(verts); continue; }
+      const bb = boundingBox(verts);
+      const w = bb.maxX - bb.minX, h = bb.maxY - bb.minY;
+      const alongY = canTurn && h > w; // locked grain: only ever cut across x
+      const work = alongY ? transpose(verts) : verts;
+      const extent = alongY ? h : w;
+      // Parts must each fit, so k is sized to the usable width.
+      const k = Math.max(2, Math.ceil(extent / usable));
+      for (let i = 0; i < k; i++) {
+        const lo = (extent * i) / k, hi = (extent * (i + 1)) / k;
+        clipPolygonToStrip(work, lo, hi).forEach((part) => next.push(alongY ? transpose(part) : part));
+      }
+    }
+    pending = next;
+  }
+  return [...done, ...pending];
+}
+
+// Directions + wall lengths for a rectilinear polygon (editor format).
+function polygonToWalls(vertices) {
+  const directions = [], wallLengths = [];
+  for (let i = 0; i < vertices.length; i++) {
+    const a = vertices[i], b = vertices[(i + 1) % vertices.length];
+    const dx = b.x - a.x, dy = b.y - a.y;
+    directions.push(dx > 0 ? "R" : dx < 0 ? "L" : dy > 0 ? "D" : "U");
+    wallLengths.push(Math.abs(dx) + Math.abs(dy));
+  }
+  return { directions, wallLengths };
+}
+
+// Keep everything that fits the roll arranged; rest stays on the canvas
+// below the plan, flagged (it overhangs the roll so it shows red).
+function placeOversizeBelow(fitted, oversize, roomsById, grainMode) {
+  let y = requiredLength(fitted, roomsById);
+  const out = [];
+  for (const inst of oversize) {
+    const room = roomsById[inst.roomId];
+    if (!room) { out.push(inst); continue; }
+    const rotation = narrowestRotation(room, grainMode);
+    y += 60;
+    const placed = { ...inst, rotation, x: 0, y };
+    const bb = boundingBox(rotatePolygon(room.vertices, rotation));
+    y += bb.maxY - bb.minY;
+    out.push(placed);
+  }
+  return out;
+}
+
 // Public entry point for Auto Arrange: a multi-start portfolio. A single
 // simulated-annealing run can land in a local optimum that a different
 // starting point would have skipped past entirely, so every press of
@@ -989,7 +1120,10 @@ function autoArrangeOnce(instanceList, roomsById, rollWidth, tolerance, grainMod
 // more-continuous cut lines than another.
 const AUTO_ARRANGE_TRIALS = 10;
 const TRIAL_BUDGET_SCALE = 0.35;
-function autoArrange(instanceList, roomsById, rollWidth, tolerance, grainMode, guillotine) {
+function autoArrange(allInstances, roomsById, rollWidth, tolerance, grainMode, guillotine) {
+  // Pieces too wide for the roll can't be packed; they're left out of the
+  // search (runAutoArrange puts them back, flagged).
+  const instanceList = allInstances.filter((i) => !isOversizeRoom(roomsById[i.roomId], rollWidth, tolerance, grainMode));
   if (instanceList.length === 0) return [];
   let best = null, bestLen = Infinity, bestCut = -Infinity;
   for (let trial = 0; trial < AUTO_ARRANGE_TRIALS; trial++) {
@@ -1483,7 +1617,7 @@ function AddRoomModal({ initialRoom, onClose, onSave, displayUnit }) {
    SECTION: LEFT SIDEBAR — rooms library + roll settings
    ====================================================================== */
 
-function LeftSidebar({ rooms, onAddRoom, onEditRoom, onDeleteRoom, onDuplicateRoom, onQuantityChange, onPlaceOnCarpet, rollWidth, setRollWidth, unit, setUnit, tolerance, setTolerance, grainMode, setGrainMode, gridSize, setGridSize, snapEnabled, setSnapEnabled, allowOverlap, setAllowOverlap, guillotineMode, setGuillotineMode }) {
+function LeftSidebar({ rooms, onAddRoom, onEditRoom, onDeleteRoom, onDuplicateRoom, onQuantityChange, onPlaceOnCarpet, onUndoJoin, rollWidth, setRollWidth, unit, setUnit, tolerance, setTolerance, grainMode, setGrainMode, gridSize, setGridSize, snapEnabled, setSnapEnabled, allowOverlap, setAllowOverlap, guillotineMode, setGuillotineMode }) {
   const [tab, setTab] = useState("rooms");
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
 
@@ -1557,6 +1691,7 @@ function LeftSidebar({ rooms, onAddRoom, onEditRoom, onDeleteRoom, onDuplicateRo
               <div className="flex items-center gap-2.5 mt-1.5 pt-1.5 border-t border-stone-100">
                 <button onClick={() => onEditRoom(room)} title="Edit this room" className="text-[11px] text-stone-500 hover:text-stone-800 flex items-center gap-1"><Pencil size={11} /> Edit</button>
                 <button onClick={() => onDuplicateRoom(room)} title="Duplicate this room" className="text-[11px] text-stone-500 hover:text-stone-800 flex items-center gap-1"><Copy size={11} /> Duplicate</button>
+                {room.joinOf && <button onClick={() => onUndoJoin(room.joinOf.id)} title="Put the original, unjoined room back" className="text-[11px] text-amber-700 hover:text-amber-900 flex items-center gap-1"><Undo size={11} /> Undo join</button>}
                 {confirmDeleteId === room.id ? (
                   <span className="ml-auto flex items-center gap-1.5 text-[11px]">
                     <span className="text-stone-500">Delete?</span>
@@ -1701,7 +1836,7 @@ function RightSidebar({ instance, room, onRotate, onDelete, onDuplicate, onAllow
    SECTION: CUTTING CANVAS
    ====================================================================== */
 
-function CuttingCanvas({ rooms, roomsById, instances, setInstances, rollWidth, tolerance, gridSize, snapEnabled, selectedId, setSelectedId, commitHistory, allowOverlap }) {
+function CuttingCanvas({ rooms, roomsById, instances, setInstances, rollWidth, tolerance, gridSize, snapEnabled, selectedId, setSelectedId, commitHistory, allowOverlap, grainMode, onPlanWithJoin }) {
   const containerRef = useRef(null);
   const [pxPerMm, setPxPerMm] = useState(0.09);
   const [pan, setPan] = useState({ x: 0, y: 0 });
@@ -1731,6 +1866,15 @@ function CuttingCanvas({ rooms, roomsById, instances, setInstances, rollWidth, t
   // Every placed piece that currently overlaps another piece, or falls
   // outside the roll width, is flagged persistently — not just while it's
   // being dragged — so collisions stay visible until resolved.
+  const oversizeRooms = useMemo(() => {
+    const seen = new Set(), out = [];
+    instances.forEach((inst) => {
+      const room = roomsById[inst.roomId];
+      if (room && !seen.has(room.id) && isOversizeRoom(room, rollWidth, tolerance, grainMode)) { seen.add(room.id); out.push(room); }
+    });
+    return out;
+  }, [instances, roomsById, rollWidth, tolerance, grainMode]);
+
   const invalidIds = useMemo(() => {
     const s = new Set();
     instances.forEach((inst) => {
@@ -1969,6 +2113,12 @@ function CuttingCanvas({ rooms, roomsById, instances, setInstances, rollWidth, t
             <AlertTriangle size={12} /> {invalidIds.size} overlapping
           </span>
         )}
+        {oversizeRooms.map((r) => (
+          <span key={r.id} className="text-[11px] font-mono text-amber-300 flex items-center gap-1.5 ml-3">
+            <AlertTriangle size={12} /> {r.name} is wider than the roll
+            <button onClick={() => onPlanWithJoin(r.id)} title="Split into narrower pieces joined after cutting, then re-arrange" className="px-2 py-0.5 rounded-full bg-amber-400/20 hover:bg-amber-400/30 text-amber-200">Plan with a join</button>
+          </span>
+        ))}
         <div className="ml-auto flex items-center gap-1">
           <button onClick={() => zoom(0.85)} title="Zoom out" className="p-2 hover:bg-white/10 rounded-full transition-colors"><ZoomOut size={14} /></button>
           <button onClick={() => zoom(1.18)} title="Zoom in" className="p-2 hover:bg-white/10 rounded-full transition-colors"><ZoomIn size={14} /></button>
@@ -2521,6 +2671,67 @@ export default function App() {
     setRooms((prev) => prev.map((r) => (r.id === id ? { ...r, quantity: qty } : r)));
   }
 
+  // Plan an oversize room with a join: it's replaced by narrower pieces
+  // (library and canvas), then Auto Arrange runs. The original is kept on
+  // each part as `joinOf` so the join can be undone.
+  const [pendingArrange, setPendingArrange] = useState(false);
+  function handlePlanWithJoin(roomId) {
+    const room = roomsById[roomId];
+    if (!room) return;
+    const parts = splitRoomForJoin(room, rollWidth, tolerance, grainMode);
+    if (parts.length < 2) { setArrangeNote("Couldn't split this room into narrower pieces"); return; }
+    const stamp = Date.now();
+    const partRooms = parts.map((verts, idx) => {
+      const bb = boundingBox(verts);
+      return {
+        ...room,
+        id: `${room.id}_join${stamp}_${idx}`,
+        name: `${room.name} (join ${idx + 1}/${parts.length})`,
+        vertices: verts,
+        ...polygonToWalls(verts),
+        width: bb.maxX - bb.minX, length: bb.maxY - bb.minY,
+        area: polygonArea(verts), corners: verts.length,
+        joinOf: room.joinOf || room,
+      };
+    });
+    setRooms((prev) => prev.flatMap((r) => (r.id === roomId ? partRooms : [r])));
+    setInstances((prev) => {
+      const next = prev.flatMap((inst) => (inst.roomId !== roomId ? [inst] : partRooms.map((pr, idx) => ({
+        ...inst, id: `inst_${stamp}_${idx}_${Math.random().toString(36).slice(2, 6)}`, roomId: pr.id, rotation: 0, x: 0, y: 0,
+      }))));
+      commitHistory(next);
+      return next;
+    });
+    setPendingArrange(true);
+  }
+
+  function handleUndoJoin(originalId) {
+    setRooms((prev) => {
+      const original = prev.find((r) => r.joinOf && r.joinOf.id === originalId)?.joinOf;
+      if (!original) return prev;
+      const kept = prev.filter((r) => !(r.joinOf && r.joinOf.id === originalId));
+      return [...kept, original];
+    });
+    setInstances((prev) => {
+      const partIds = new Set(rooms.filter((r) => r.joinOf && r.joinOf.id === originalId).map((r) => r.id));
+      const count = prev.filter((i) => partIds.has(i.roomId)).length / Math.max(1, partIds.size);
+      const rest = prev.filter((i) => !partIds.has(i.roomId));
+      const readded = Array.from({ length: Math.round(count) }, (_, k) => ({
+        id: `inst_${Date.now()}_${k}_${Math.random().toString(36).slice(2, 6)}`, roomId: originalId, rotation: 0, x: 0, y: requiredLength(rest, roomsById) + 60 + k * 10,
+      }));
+      const next = [...rest, ...readded];
+      commitHistory(next);
+      return next;
+    });
+    setPendingArrange(true);
+  }
+
+  useEffect(() => {
+    if (!pendingArrange) return;
+    setPendingArrange(false);
+    runAutoArrange();
+  }, [pendingArrange, rooms]); // eslint-disable-line
+
   function rotateSelected() {
     setInstances((prev) => {
       const next = prev.map((i) => {
@@ -2617,67 +2828,67 @@ export default function App() {
     setTimeout(() => {
       setInstances((prev) => {
         if (prev.length === 0) return prev;
-        const currentLen = requiredLength(prev, roomsById);
+        const { rollWidth, tolerance, grainMode, guillotineMode } = settingsRef.current;
+        // Pieces wider than the roll in every allowed rotation can't be
+        // packed. They are never removed: they're set aside, the rest is
+        // arranged, and they're put back below the plan, flagged.
+        const isBig = (i) => isOversizeRoom(roomsById[i.roomId], rollWidth, tolerance, grainMode);
+        const oversize = prev.filter(isBig);
+        const fitPrev = prev.filter((i) => !isBig(i));
+        const finish = (fitted, note) => {
+          const result = oversize.length ? [...fitted, ...placeOversizeBelow(fitted, oversize, roomsById, grainMode)] : fitted;
+          const warn = oversize.length ? `${oversize.length} piece${oversize.length > 1 ? "s" : ""} wider than the roll — flagged; use "Plan with a join"` : null;
+          setArrangeNote([note, warn].filter(Boolean).join(" · ") || null);
+          return result;
+        };
+        if (fitPrev.length === 0) {
+          if (!oversize.length) return prev;
+          const result = finish([], null);
+          commitHistory(result);
+          return result;
+        }
+        const currentLen = requiredLength(fitPrev, roomsById);
         // A room's wall dimensions can be edited after instances of it are
         // already placed — the instances keep their old x/y, so they can
         // now overlap a neighbour or stick outside the roll that used to
-        // fit fine. requiredLength can't see this: overlapping pieces
-        // share the same space, so the invalid current layout can measure
-        // the same as, or even shorter than, any valid rearrangement. So
-        // validity is checked FIRST, before any length comparison — a
-        // short layout that can't actually be cut is never "efficient".
-        const { rollWidth, tolerance, grainMode, guillotineMode } = settingsRef.current;
-        const currentInvalid = layoutHasCollisions(prev, roomsById, rollWidth, tolerance);
+        // fit fine. requiredLength can't see this, so validity is checked
+        // FIRST, before any length comparison.
+        const currentInvalid = layoutHasCollisions(fitPrev, roomsById, rollWidth, tolerance);
         // Settings may have changed since the plan was made: a rotation the
         // current setting no longer permits, or guillotine mode switched on
         // for a plan that wasn't built that way, makes the plan
         // non-compliant — so it must be replaced even if it measures shorter.
         const breaksRotation = grainMode === "locked"
-          ? prev.some((i) => ((i.rotation || 0) % 360) !== 0)
+          ? fitPrev.some((i) => ((i.rotation || 0) % 360) !== 0)
           : grainMode === "90"
-            ? prev.some((i) => ((i.rotation || 0) % 90) !== 0)
+            ? fitPrev.some((i) => ((i.rotation || 0) % 90) !== 0)
             : false;
         const breaksGuillotine = guillotineMode && !lastArrangedGuillotine.current;
-        const next = autoArrange(prev, roomsById, rollWidth, tolerance, grainMode, guillotineMode);
+        const next = autoArrange(fitPrev, roomsById, rollWidth, tolerance, grainMode, guillotineMode);
         const nextLen = requiredLength(next, roomsById);
         lastArrangedGuillotine.current = guillotineMode;
-        if (breaksRotation || breaksGuillotine) {
-          commitHistory(next);
-          setArrangeNote("Plan rebuilt to match your current settings");
-          return next;
+        // Auto Arrange must never make the current plan worse: whatever's
+        // on the carpet (including manual work) is only replaced by
+        // something strictly shorter, or equal length but easier to cut.
+        let chosen = null, note = null;
+        if (breaksRotation || breaksGuillotine) { chosen = next; note = "Plan rebuilt to match your current settings"; }
+        else if (currentInvalid) { chosen = next; note = nextLen < currentLen - EPS ? "Fixed overlapping pieces and shortened the plan" : "Fixed overlapping pieces"; }
+        else if (nextLen < currentLen - EPS) { chosen = next; }
+        else if (Math.abs(nextLen - currentLen) <= EPS && cuttabilityScore(next, roomsById, rollWidth) > cuttabilityScore(fitPrev, roomsById, rollWidth) + EPS) {
+          chosen = next; note = "Same length, easier to cut — plan updated";
         }
-        if (currentInvalid) {
-          commitHistory(next);
-          setArrangeNote(nextLen < currentLen - EPS
-            ? "Fixed overlapping pieces and shortened the plan"
-            : "Fixed overlapping pieces");
-          return next;
+        if (chosen) {
+          const result = finish(chosen, note);
+          commitHistory(result);
+          return result;
         }
-        // Auto Arrange must never make the current plan worse: the search
-        // explores many candidate layouts, but whatever's on the carpet
-        // right now — including anything manually dragged into place — is
-        // only ever replaced by something that needs strictly less roll,
-        // OR needs exactly the same roll but is meaningfully easier to cut
-        // (straighter/longer shared edges, same-room pieces grouped into
-        // one block, more clean full-width cut lines — see
-        // cuttabilityScore). A same-length-but-not-actually-easier result
-        // is discarded, same as a longer one, so this never disturbs
-        // manual work for a wash.
-        if (nextLen < currentLen - EPS) {
-          commitHistory(next);
-          return next;
+        if (oversize.length === 0) {
+          setArrangeNote("Already the shortest (and easiest-to-cut) layout found — current plan kept");
+          return prev;
         }
-        if (Math.abs(nextLen - currentLen) <= EPS) {
-          const currentCut = cuttabilityScore(prev, roomsById, rollWidth);
-          const nextCut = cuttabilityScore(next, roomsById, rollWidth);
-          if (nextCut > currentCut + EPS) {
-            commitHistory(next);
-            setArrangeNote("Same length, easier to cut — plan updated");
-            return next;
-          }
-        }
-        setArrangeNote("Already the shortest (and easiest-to-cut) layout found — current plan kept");
-        return prev;
+        const result = finish(fitPrev, "Already the shortest layout found");
+        commitHistory(result);
+        return result;
       });
       setArranging(false);
     }, 10);
@@ -2711,7 +2922,7 @@ export default function App() {
       <div className="flex flex-1 min-h-0">
         <LeftSidebar
           rooms={rooms} onAddRoom={() => setModal({ mode: "add" })} onEditRoom={(r) => setModal({ mode: "edit", room: r })}
-          onDeleteRoom={handleDeleteRoom} onDuplicateRoom={handleDuplicateRoom} onQuantityChange={handleQuantityChange}
+          onDeleteRoom={handleDeleteRoom} onDuplicateRoom={handleDuplicateRoom} onQuantityChange={handleQuantityChange} onUndoJoin={handleUndoJoin}
           onPlaceOnCarpet={placeRoomOnCarpet}
           rollWidth={rollWidth} setRollWidth={setRollWidth} unit={unit} setUnit={setUnit}
           tolerance={tolerance} setTolerance={setTolerance} grainMode={grainMode} setGrainMode={setGrainMode}
@@ -2725,7 +2936,7 @@ export default function App() {
               rooms={rooms} roomsById={roomsById} instances={instances} setInstances={setInstances}
               rollWidth={rollWidth} tolerance={tolerance} gridSize={gridSize} snapEnabled={snapEnabled}
               selectedId={selectedId} setSelectedId={setSelectedId} commitHistory={commitHistory}
-              allowOverlap={allowOverlap}
+              allowOverlap={allowOverlap} grainMode={grainMode} onPlanWithJoin={handlePlanWithJoin}
             />
             <RightSidebar
               instance={selectedInstance} room={selectedRoom} onRotate={rotateSelected} onDelete={deleteSelected}
