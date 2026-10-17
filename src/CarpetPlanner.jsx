@@ -1,9 +1,10 @@
-import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import {
-  Plus, Trash2, Copy, RotateCw, Undo2, Redo2, Grid3x3, ZoomIn, ZoomOut,
+  Plus, Trash2, Copy, RotateCw, Undo2, Redo2, ZoomIn, ZoomOut,
   Maximize2, X, Check, AlertTriangle, Ruler, Layers, ScissorsLineDashed,
-  ArrowRight, ArrowUp, ArrowLeft, ArrowDown, Settings2, FolderOpen, Save,
-  Pencil, ChevronLeft, ChevronRight, Undo, Info, Download, FileText, ChevronUp, ChevronDown,
+  ArrowRight, ArrowUp, ArrowLeft, ArrowDown, Settings2, Save,
+  Pencil, ChevronLeft, ChevronRight, Undo, Info, Download, FileText, ChevronDown,
+  Sparkles, Loader2, MousePointerClick, LayoutGrid, CheckCircle2, CircleDashed, HelpCircle, Printer,
 } from "lucide-react";
 
 /* ======================================================================
@@ -971,7 +972,6 @@ function autoArrangeOnce(instanceList, roomsById, rollWidth, tolerance, grainMod
   return compactLayout(best, roomsById, rollWidth, tolerance);
 }
 
-
 /* ----------------------------------------------------------------------
    Oversize pieces + joins. A room can be wider than the roll in every
    rotation Auto Arrange is allowed to use. Such a piece is never dropped:
@@ -1072,6 +1072,48 @@ function splitRoomForJoin(room, rollWidth, tolerance, grainMode) {
   return [...done, ...pending];
 }
 
+// Every sensible way to split an oversize room for a join: straight cuts
+// across one axis, either into equal strips or the usual fitting practice of
+// full roll-width drops plus one narrow fill strip (at either end), which can
+// often tuck in beside other pieces. Each candidate is a list of parts that
+// all fit the roll. The plain equal split above is always included.
+const MIN_JOIN_STRIP = 100; // mm — ponytail: narrower fill strips are rejected as unfittable slivers; make it a setting if fitters want thinner
+function joinSplitCandidates(room, rollWidth, tolerance, grainMode) {
+  const usable = rollWidth - tolerance;
+  const transpose = (verts) => verts.map((v) => ({ x: v.y, y: v.x }));
+  const fits = (verts) => !isOversizeRoom({ vertices: verts }, rollWidth, tolerance, grainMode);
+  const out = [], seen = new Set();
+  const push = (parts) => {
+    if (parts.length < 2 || !parts.every(fits)) return;
+    if (parts.some((p) => { const bb = boundingBox(p); return Math.min(bb.maxX - bb.minX, bb.maxY - bb.minY) < MIN_JOIN_STRIP; })) return;
+    const key = parts.map((p) => JSON.stringify(p)).sort().join("|");
+    if (!seen.has(key)) { seen.add(key); out.push(parts); }
+  };
+  // Locked grain: only cut across x (the parts can't be turned).
+  for (const alongY of grainMode === "locked" ? [false] : [false, true]) {
+    const work = alongY ? transpose(room.vertices) : room.vertices;
+    const bb = boundingBox(work);
+    const extent = bb.maxX - bb.minX;
+    if (extent <= usable + EPS) continue;
+    const k = Math.ceil(extent / usable);
+    const cutSets = [
+      Array.from({ length: k - 1 }, (_, i) => (extent * (i + 1)) / k), // equal strips
+      Array.from({ length: k - 1 }, (_, i) => usable * (i + 1)), // full widths, fill strip last
+      Array.from({ length: k - 1 }, (_, i) => extent - usable * (k - 1 - i)), // fill strip first
+    ];
+    for (const cuts of cutSets) {
+      const edges = [bb.minX, ...cuts.map((c) => bb.minX + c), bb.maxX];
+      const parts = [];
+      for (let i = 0; i < edges.length - 1; i++) {
+        clipPolygonToStrip(work, edges[i], edges[i + 1]).forEach((p) => parts.push(alongY ? transpose(p) : p));
+      }
+      push(parts);
+    }
+  }
+  push(splitRoomForJoin(room, rollWidth, tolerance, grainMode));
+  return out;
+}
+
 // Directions + wall lengths for a rectilinear polygon (editor format).
 function polygonToWalls(vertices) {
   const directions = [], wallLengths = [];
@@ -1125,6 +1167,7 @@ function autoArrange(allInstances, roomsById, rollWidth, tolerance, grainMode, g
   // search (runAutoArrange puts them back, flagged).
   const instanceList = allInstances.filter((i) => !isOversizeRoom(roomsById[i.roomId], rollWidth, tolerance, grainMode));
   if (instanceList.length === 0) return [];
+
   let best = null, bestLen = Infinity, bestCut = -Infinity;
   for (let trial = 0; trial < AUTO_ARRANGE_TRIALS; trial++) {
     const randomSeed = trial > 0; // trial 0 keeps the proven strong seed
@@ -1144,23 +1187,48 @@ function autoArrange(allInstances, roomsById, rollWidth, tolerance, grainMode, g
    SECTION: UNITS / FORMATTING
    ====================================================================== */
 
+const MM_PER_FOOT = 304.8, MM_PER_INCH = 25.4;
+
+// Accepts plain numbers (in defaultUnit) or tokens such as "3m 45cm",
+// "12ft 6in", "12' 6\"" or "150 inches". defaultUnit "ft" means feet.
 function parseLength(input, defaultUnit) {
   if (input == null || input === "") return null;
-  const str = String(input).trim().toLowerCase();
+  const str = String(input).trim().toLowerCase().replace(/[′’]/g, "'").replace(/[″”]/g, '"');
   if (/^[0-9.]+$/.test(str)) {
     const v = parseFloat(str);
     if (isNaN(v)) return null;
+    if (defaultUnit === "ft") return ceilToCm(v * MM_PER_FOOT);
     return defaultUnit === "m" ? v * 1000 : defaultUnit === "cm" ? v * 10 : v;
   }
-  const tokenRe = /([0-9]*\.?[0-9]+)\s*(mm|cm|m)/g;
-  let match, total = 0, found = false;
+  const tokenRe = /([0-9]*\.?[0-9]+)\s*(mm|cm|m|feet|foot|ft|'|inches|inch|in|")/g;
+  let match, total = 0, found = false, imperial = false;
   while ((match = tokenRe.exec(str)) !== null) {
     found = true;
+    if (!["m", "cm", "mm"].includes(match[2])) imperial = true;
     const v = parseFloat(match[1]);
     const unit = match[2];
-    total += unit === "m" ? v * 1000 : unit === "cm" ? v * 10 : v;
+    if (unit === "m") total += v * 1000;
+    else if (unit === "cm") total += v * 10;
+    else if (unit === "mm") total += v;
+    else if (unit === "feet" || unit === "foot" || unit === "ft" || unit === "'") total += v * MM_PER_FOOT;
+    else total += v * MM_PER_INCH;
   }
-  return found ? total : null;
+  if (!found) return null;
+  return imperial ? ceilToCm(total) : total;
+}
+
+// Feet/inches always round UP to the next centimetre (2 d.p. in metres), so
+// a converted size is never smaller than the real wall. The epsilon stops
+// float noise (e.g. 3000.0000001) bumping an exact value up a whole cm.
+function ceilToCm(mm) { return Math.ceil(mm / 10 - 1e-9) * 10; }
+
+// 3048 -> 10′ 0″ (inches to the nearest half inch). Only used while entering sizes.
+function formatFtIn(mm) {
+  if (mm == null || isNaN(mm)) return "-";
+  let totalIn = Math.round((mm / MM_PER_INCH) * 2) / 2;
+  const ft = Math.floor(totalIn / 12);
+  const inch = Math.round((totalIn - ft * 12) * 2) / 2;
+  return `${ft}′ ${inch}″`;
 }
 
 function formatLength(mm, unit) {
@@ -1172,8 +1240,40 @@ function formatLength(mm, unit) {
 
 function formatArea(mm2) { return (mm2 / 1_000_000).toFixed(2) + "m\u00B2"; }
 
+/* Gripper rod: grippers = round up( perimeter metres / 1.5 + steps ).
+   - every room's whole perimeter, once per copy ("How many")
+   - a room split for a join counts its ORIGINAL outline once (no gripper
+     along the seam between its parts)
+   - stairs rooms add 1 gripper per step ("How many" = steps) and nothing
+     for their edges
+   Total-metres method: assumes offcuts are reused on other walls. */
+const GRIPPER_LENGTH_MM = 1500;
+function polygonPerimeter(vertices) {
+  let p = 0;
+  for (let i = 0; i < vertices.length; i++) {
+    const a = vertices[i], b = vertices[(i + 1) % vertices.length];
+    p += Math.abs(b.x - a.x) + Math.abs(b.y - a.y);
+  }
+  return p;
+}
+function gripperCount(rooms) {
+  let perimeterMm = 0, steps = 0;
+  const counted = new Set();
+  for (const r of rooms) {
+    const src = r.joinOf || r;
+    if (counted.has(src.id)) continue;
+    counted.add(src.id);
+    const qty = Math.max(1, r.quantity || 1);
+    if (src.isStairs) steps += qty;
+    else perimeterMm += polygonPerimeter(src.vertices) * qty;
+  }
+  // epsilon: an exact multiple of 1.5m (e.g. 18m) must not tip up to the next gripper
+  const grippers = Math.ceil(perimeterMm / GRIPPER_LENGTH_MM - 1e-9) + steps;
+  return { perimeterMm, steps, grippers };
+}
+
 const DIR_ICON = { R: ArrowRight, L: ArrowLeft, U: ArrowUp, D: ArrowDown };
-const ROOM_COLORS = ["#c98a3a", "#3c7a6f", "#8a5fb0", "#4a7fb5", "#b5583f", "#5a8a4a", "#a3843f", "#7a5a8a"];
+const ROOM_COLORS = ["#c98a3a", "#d93732", "#8a5fb0", "#4a7fb5", "#b5583f", "#5a8a4a", "#a3843f", "#7a5a8a"];
 
 /* ======================================================================
    SECTION: PERSISTENCE
@@ -1212,49 +1312,213 @@ async function saveProject(data) {
 }
 
 /* ======================================================================
-   SECTION: SMALL PRESENTATIONAL PIECES
+   SECTION: UI PRIMITIVES
+   Small shared building blocks so every screen uses the same buttons,
+   inputs, toggles and panels.
+   ====================================================================== */
+
+function cls(...c) { return c.filter(Boolean).join(" "); }
+
+const FOCUS_RING = "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40 focus-visible:ring-offset-1";
+const INPUT = "w-full h-10 rounded-lg border border-stone-200 bg-white px-3 text-sm text-stone-800 placeholder:text-stone-500 focus:outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20 transition";
+const SELECT = INPUT + " pr-8 appearance-none bg-no-repeat bg-[right_0.6rem_center] bg-[length:14px] bg-[url('data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 24 24%22 fill=%22none%22 stroke=%22%2378716c%22 stroke-width=%222%22><path d=%22m6 9 6 6 6-6%22/></svg>')]";
+
+const BTN_VARIANTS = {
+  primary: "bg-brand-600 text-white hover:bg-brand-700 shadow-sm",
+  dark: "bg-ink-800 text-white hover:bg-ink-900 shadow-sm",
+  secondary: "bg-white text-stone-800 ring-1 ring-stone-900/10 hover:ring-stone-900/20 hover:bg-stone-50 shadow-[0_1px_2px_rgba(60,40,30,0.06)]",
+  ghost: "text-stone-600 hover:bg-stone-100 hover:text-stone-900",
+  danger: "bg-red-600 text-white hover:bg-red-700 shadow-sm",
+  dangerSoft: "text-red-600 bg-red-50 hover:bg-red-100",
+};
+const BTN_SIZES = { sm: "h-8 px-3 text-xs gap-1.5", md: "h-10 px-4 text-sm gap-2", lg: "h-11 px-5 text-sm gap-2" };
+
+function Button({ variant = "secondary", size = "md", className = "", children, ...props }) {
+  return (
+    <button
+      type="button"
+      {...props}
+      className={cls("inline-flex items-center justify-center font-medium rounded-lg whitespace-nowrap transition-[background-color,color,box-shadow,transform] duration-150 active:scale-[0.98] disabled:opacity-40 disabled:pointer-events-none", FOCUS_RING, BTN_VARIANTS[variant], BTN_SIZES[size], className)}
+    >
+      {children}
+    </button>
+  );
+}
+
+function IconButton({ label, children, className = "", ...props }) {
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      title={label}
+      {...props}
+      className={cls("inline-flex items-center justify-center w-9 h-9 rounded-lg text-stone-600 hover:bg-stone-100 hover:text-stone-900 transition-colors disabled:opacity-30 disabled:pointer-events-none", FOCUS_RING, className)}
+    >
+      {children}
+    </button>
+  );
+}
+
+function Field({ label, hint, children }) {
+  return (
+    <label className="block">
+      <span className="block text-xs font-medium text-stone-600 mb-1.5">{label}</span>
+      {children}
+      {hint && <span className="block text-xs leading-snug text-stone-500 mt-1.5">{hint}</span>}
+    </label>
+  );
+}
+
+function Toggle({ checked, onChange, label, description }) {
+  return (
+    <div className="flex items-start gap-3">
+      <button
+        type="button" role="switch" aria-checked={checked} aria-label={label}
+        onClick={() => onChange(!checked)}
+        className={cls("relative mt-0.5 w-9 h-5 shrink-0 rounded-full transition-colors", FOCUS_RING, checked ? "bg-brand-500" : "bg-stone-300")}
+      >
+        <span className={cls("absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform", checked && "translate-x-4")} />
+      </button>
+      <div className="min-w-0 cursor-pointer" onClick={() => onChange(!checked)}>
+        <span className="block text-sm text-stone-800 leading-snug">{label}</span>
+        {description && <span className="block text-xs text-stone-600 mt-1 leading-snug">{description}</span>}
+      </div>
+    </div>
+  );
+}
+
+function Segmented({ value, onChange, options, className = "" }) {
+  return (
+    <div className={cls("inline-flex p-1 bg-stone-100 rounded-lg", className)}>
+      {options.map((o) => (
+        <button
+          key={o.value} type="button" onClick={() => onChange(o.value)}
+          className={cls("flex-1 px-3 h-8 text-xs font-medium rounded-md whitespace-nowrap transition-all", FOCUS_RING, value === o.value ? "bg-white text-stone-900 shadow-sm" : "text-stone-600 hover:text-stone-800")}
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function QtyStepper({ value, onChange }) {
+  return (
+    <div className="inline-flex items-center h-8 rounded-lg border border-stone-200 bg-white overflow-hidden">
+      <button type="button" onClick={() => onChange(Math.max(1, value - 1))} aria-label="Decrease quantity" title="Decrease quantity" className="w-8 h-full text-stone-600 hover:bg-stone-100 hover:text-stone-900 transition-colors">−</button>
+      <input
+        type="number" min="1" value={value} aria-label="Quantity"
+        onChange={(e) => onChange(Math.max(1, parseInt(e.target.value) || 1))}
+        className="w-10 h-full text-center text-sm font-medium tabular-nums border-x border-stone-200 focus:outline-none focus:bg-brand-50 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+      />
+      <button type="button" onClick={() => onChange(value + 1)} aria-label="Increase quantity" title="Increase quantity" className="w-8 h-full text-stone-600 hover:bg-stone-100 hover:text-stone-900 transition-colors">+</button>
+    </div>
+  );
+}
+
+function Panel({ title, icon: Icon, action, children, className = "" }) {
+  return (
+    <section className={cls("bg-white rounded-xl border border-stone-200 shadow-sm", className)}>
+      {title && (
+        <header className="flex items-center gap-2 px-4 pt-4 pb-3">
+          {Icon && <Icon size={15} className="text-stone-500" />}
+          <h2 className="text-sm font-semibold text-stone-900">{title}</h2>
+          {action && <div className="ml-auto">{action}</div>}
+        </header>
+      )}
+      <div className={title ? "px-4 pb-4" : "p-4"}>{children}</div>
+    </section>
+  );
+}
+
+function Notice({ tone = "info", children }) {
+  const tones = {
+    info: "bg-stone-50 border-stone-200 text-stone-600",
+    warn: "bg-amber-50 border-amber-200 text-amber-800",
+    error: "bg-red-50 border-red-200 text-red-700",
+    success: "bg-emerald-50 border-emerald-200 text-emerald-800",
+  };
+  const Icon = tone === "success" ? CheckCircle2 : tone === "info" ? Info : AlertTriangle;
+  return (
+    <div className={cls("flex items-start gap-2 text-xs leading-snug border rounded-lg px-3 py-2.5", tones[tone])}>
+      <Icon size={14} className="shrink-0 mt-px" />
+      <div className="min-w-0">{children}</div>
+    </div>
+  );
+}
+
+// Modal shell: dimmed backdrop, centred card, Escape to close (when allowed).
+function Modal({ onClose, dismissible = true, className = "", labelledBy, children }) {
+  useEffect(() => {
+    if (!dismissible) return;
+    function onKey(e) { if (e.key === "Escape") onClose(); }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose, dismissible]);
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-stone-900/50 backdrop-blur-[2px] animate-fade-in"
+      onMouseDown={(e) => { if (dismissible && e.target === e.currentTarget) onClose(); }}
+    >
+      <div role="dialog" aria-modal="true" aria-labelledby={labelledBy} className={cls("bg-white rounded-2xl shadow-2xl w-full flex flex-col max-h-[94vh] overflow-hidden animate-pop-in", className)}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function Toast({ toast, onDismiss }) {
+  if (!toast) return null;
+  const Icon = toast.tone === "success" ? CheckCircle2 : toast.tone === "warn" ? AlertTriangle : Info;
+  const iconColor = toast.tone === "success" ? "text-emerald-400" : toast.tone === "warn" ? "text-amber-400" : "text-sky-300";
+  return (
+    <div className="fixed top-[68px] left-1/2 -translate-x-1/2 z-[60] px-3 w-full max-w-md pointer-events-none">
+      <div key={toast.id} role="status" className="pointer-events-auto flex items-center gap-3 bg-stone-900 text-stone-100 text-sm rounded-xl shadow-xl pl-4 pr-2 py-2.5 animate-toast-in">
+        <Icon size={16} className={cls("shrink-0", iconColor)} />
+        <span className="flex-1 leading-snug">{toast.message}</span>
+        <button onClick={onDismiss} aria-label="Dismiss" className="p-1.5 rounded-md text-stone-500 hover:text-white hover:bg-white/10"><X size={14} /></button>
+      </div>
+    </div>
+  );
+}
+
+/* ======================================================================
+   SECTION: SHAPE PREVIEWS
    ====================================================================== */
 
 function RoomThumbnail({ vertices, color, size = 72 }) {
   const bb = boundingBox(vertices);
   const w = bb.maxX - bb.minX || 1, h = bb.maxY - bb.minY || 1;
-  const pad = 6;
+  const pad = Math.max(4, size * 0.08);
   const scale = Math.min((size - pad * 2) / w, (size - pad * 2) / h);
-  const pts = vertices.map((v) => `${(v.x - bb.minX) * scale + pad},${(v.y - bb.minY) * scale + pad}`).join(" ");
+  const ox = (size - w * scale) / 2, oy = (size - h * scale) / 2;
+  const pts = vertices.map((v) => `${(v.x - bb.minX) * scale + ox},${(v.y - bb.minY) * scale + oy}`).join(" ");
   return (
-    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} className="shrink-0">
-      <polygon points={pts} fill={color + "33"} stroke={color} strokeWidth="2" strokeLinejoin="round" />
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} className="shrink-0" aria-hidden="true">
+      <polygon points={pts} fill={color + "2e"} stroke={color} strokeWidth="2" strokeLinejoin="round" />
     </svg>
   );
 }
 
-function Field({ label, children }) {
-  return (
-    <label className="block">
-      <span className="block text-[11px] uppercase tracking-wide text-stone-400 mb-1">{label}</span>
-      {children}
-    </label>
-  );
-}
-
-function WallShapePreview({ vertices, lengths, unit, activeWall }) {
+function WallShapePreview({ vertices, lengths, unit, activeWall, onPickWall }) {
   if (!vertices || vertices.length < 3) return null;
   const bb = boundingBox(vertices);
   const w = bb.maxX - bb.minX || 1, h = bb.maxY - bb.minY || 1;
-  const boxW = 240, boxH = 200, pad = 28;
+  const boxW = 300, boxH = 240, pad = 34;
   const scale = Math.min((boxW - pad * 2) / w, (boxH - pad * 2) / h);
-  const pts = vertices.map((v) => ({ x: (v.x - bb.minX) * scale + pad, y: (v.y - bb.minY) * scale + pad }));
+  const ox = (boxW - w * scale) / 2, oy = (boxH - h * scale) / 2;
+  const pts = vertices.map((v) => ({ x: (v.x - bb.minX) * scale + ox, y: (v.y - bb.minY) * scale + oy }));
   const cx = pts.reduce((s, p) => s + p.x, 0) / pts.length;
   const cy = pts.reduce((s, p) => s + p.y, 0) / pts.length;
   const pointsStr = pts.map((p) => `${p.x},${p.y}`).join(" ");
   return (
-    <svg width={boxW} height={boxH} viewBox={`0 0 ${boxW} ${boxH}`} className="bg-white border border-stone-300 rounded-xl shrink-0">
-      <polygon points={pointsStr} fill="#c98a3a22" stroke="#c98a3a" strokeWidth="2" strokeLinejoin="round" />
+    <svg viewBox={`0 0 ${boxW} ${boxH}`} className="w-full h-auto bg-stone-50 border border-stone-200 rounded-xl" role="img" aria-label="Room shape with numbered walls">
+      <polygon points={pointsStr} fill="#d9373214" stroke="#a8a29e" strokeWidth="2" strokeLinejoin="round" />
       {activeWall != null && pts[activeWall] && (
         <line
           x1={pts[activeWall].x} y1={pts[activeWall].y}
           x2={pts[(activeWall + 1) % pts.length].x} y2={pts[(activeWall + 1) % pts.length].y}
-          stroke="#3c7a6f" strokeWidth="4" strokeLinecap="round"
+          stroke="#d93732" strokeWidth="5" strokeLinecap="round"
         />
       )}
       {pts.map((p, i) => {
@@ -1263,15 +1527,15 @@ function WallShapePreview({ vertices, lengths, unit, activeWall }) {
         let dx = mx - cx, dy = my - cy;
         const dist = Math.hypot(dx, dy) || 1;
         dx /= dist; dy /= dist;
-        const lx = mx + dx * 15, ly = my + dy * 15;
+        const lx = mx + dx * 17, ly = my + dy * 17;
         const active = activeWall === i;
         const len = lengths ? parseLength(lengths[i], unit) : null;
         return (
-          <g key={i}>
-            <circle cx={lx} cy={ly} r={active ? 10 : 8} fill={active ? "#3c7a6f" : "#f7f5f0"} stroke={active ? "#3c7a6f" : "#c98a3a"} strokeWidth="1.5" />
-            <text x={lx} y={ly + 3} fontSize="9" fontFamily="monospace" fontWeight="bold" textAnchor="middle" fill={active ? "white" : "#c98a3a"}>{i + 1}</text>
+          <g key={i} onClick={() => onPickWall && onPickWall(i)} style={{ cursor: onPickWall ? "pointer" : "default" }}>
+            <circle cx={lx} cy={ly} r={active ? 11 : 9} fill={active ? "#d93732" : "white"} stroke={active ? "#d93732" : "#a8a29e"} strokeWidth="1.5" />
+            <text x={lx} y={ly + 3.5} fontSize="10" fontWeight="600" textAnchor="middle" fill={active ? "white" : "#57534e"}>{i + 1}</text>
             {active && len != null && (
-              <text x={mx} y={my - dy * 6 - 4} fontSize="10" fontFamily="monospace" fontWeight="bold" textAnchor="middle" fill="#3c7a6f">{formatLength(len, unit)}</text>
+              <text x={mx - dx * 14} y={my - dy * 14 + 4} fontSize="11" fontWeight="600" textAnchor="middle" fill="#8e1b22">{unit === "ft" ? formatFtIn(len) : formatLength(len, unit)}</text>
             )}
           </g>
         );
@@ -1281,30 +1545,84 @@ function WallShapePreview({ vertices, lengths, unit, activeWall }) {
 }
 
 /* ======================================================================
-   SECTION: ADD / EDIT ROOM MODAL
+   SECTION: ADD / EDIT ROOM WIZARD
    ====================================================================== */
 
 const DRAW_W = 640, DRAW_H = 420, DRAW_SNAP = 20;
 
-function AddRoomModal({ initialRoom, onClose, onSave, displayUnit }) {
-  const [step, setStep] = useState(initialRoom ? "dims" : "draw");
-  const [points, setPoints] = useState(
-    initialRoom ? [] : []
-  );
-  const [directions, setDirections] = useState(initialRoom ? initialRoom.directions : []);
+// Ready-made outlines (in drawing-canvas coordinates) so the most common
+// rooms don't need drawing at all — picking one jumps straight to wall sizes.
+const SHAPE_TEMPLATES = [
+  { key: "rect", label: "Rectangle", points: [{ x: 160, y: 100 }, { x: 480, y: 100 }, { x: 480, y: 320 }, { x: 160, y: 320 }] },
+  { key: "l", label: "L-shape", points: [{ x: 160, y: 80 }, { x: 480, y: 80 }, { x: 480, y: 220 }, { x: 320, y: 220 }, { x: 320, y: 340 }, { x: 160, y: 340 }] },
+  { key: "t", label: "T-shape", points: [{ x: 120, y: 80 }, { x: 520, y: 80 }, { x: 520, y: 200 }, { x: 400, y: 200 }, { x: 400, y: 340 }, { x: 240, y: 340 }, { x: 240, y: 200 }, { x: 120, y: 200 }] },
+];
+
+const DIR_LABEL = { R: "right", L: "left", U: "up", D: "down" };
+
+function templateDirections(points) {
+  return points.map((a, i) => {
+    const b = points[(i + 1) % points.length];
+    if (Math.abs(b.x - a.x) > Math.abs(b.y - a.y)) return b.x > a.x ? "R" : "L";
+    return b.y > a.y ? "D" : "U";
+  });
+}
+
+// mm -> a plain number string in the given unit (used to pre-fill edit fields).
+function toUnitString(mm, unit) {
+  if (mm == null || isNaN(mm)) return "";
+  if (unit === "ft") {
+    const totalIn = Math.round((mm / MM_PER_INCH) * 2) / 2;
+    const ft = Math.floor(totalIn / 12);
+    const inch = Math.round((totalIn - ft * 12) * 2) / 2;
+    return inch ? `${ft}ft ${inch}in` : `${ft}ft`;
+  }
+  const v = unit === "m" ? mm / 1000 : unit === "cm" ? mm / 10 : mm;
+  return String(Math.round(v * 1000) / 1000);
+}
+
+function splitFtIn(text) {
+  const t = String(text || "").toLowerCase();
+  const ft = t.match(/([0-9]*\.?[0-9]+)\s*(ft|feet|foot|')/);
+  const inch = t.match(/([0-9]*\.?[0-9]+)\s*(in|inch|inches|")/);
+  if (!ft && !inch && /^[0-9.]+$/.test(t.trim())) return { ft: t.trim(), inch: "" };
+  return { ft: ft ? ft[1] : "", inch: inch ? inch[1] : "" };
+}
+function joinFtIn(ft, inch) {
+  const f = String(ft).trim(), i = String(inch).trim();
+  if (!f && !i) return "";
+  return [f && `${f}ft`, i && `${i}in`].filter(Boolean).join(" ");
+}
+
+function AddRoomModal({ initialRoom, initialTemplate, onClose, onSave, displayUnit, inputUnit }) {
+  const initialUnit = inputUnit || displayUnit || "mm";
+  // A shape picked from the Rooms page skips the drawing step entirely.
+  const templateDirs = !initialRoom && initialTemplate ? templateDirections(initialTemplate.points) : null;
+  const [step, setStep] = useState(initialRoom || templateDirs ? "dims" : "draw");
+  const [points, setPoints] = useState(templateDirs ? initialTemplate.points : []);
+  const [directions, setDirections] = useState(initialRoom ? initialRoom.directions : templateDirs || []);
   const [drawError, setDrawError] = useState("");
   const [cursor, setCursor] = useState(null);
+  // Stored wall lengths are millimetres; show them in the unit the fields use.
   const [lengths, setLengths] = useState(
-    initialRoom ? initialRoom.wallLengths.map(String) : []
+    initialRoom ? initialRoom.wallLengths.map((mm) => toUnitString(mm, initialUnit)) : templateDirs ? templateDirs.map(() => "") : []
   );
-  const [unit, setUnit] = useState(displayUnit || "mm");
+  const [unit, setUnit] = useState(initialUnit);
   const [activeWall, setActiveWall] = useState(null);
   const [name, setName] = useState(initialRoom?.name || "");
   const [quantity, setQuantity] = useState(initialRoom?.quantity ?? 1);
   const [notes, setNotes] = useState(initialRoom?.notes || "");
-  const [allowance, setAllowance] = useState(initialRoom?.cuttingAllowance ?? "");
+  // Stored in mm, entered in cm.
+  const [allowance, setAllowance] = useState(initialRoom?.cuttingAllowance != null ? String(initialRoom.cuttingAllowance / 10) : "");
   const [grain, setGrain] = useState(initialRoom?.grainDirection ?? false);
+  const [isStairs, setIsStairs] = useState(initialRoom?.isStairs ?? false);
   const svgRef = useRef(null);
+  const wallInputs = useRef([]);
+  const inchInputs = useRef([]);
+  const isFt = unit === "ft";
+  // While sizes are typed in feet & inches, show them that way too (with the
+  // metric equivalent alongside); everything after this wizard stays metric.
+  const showLen = (mm) => (isFt ? formatFtIn(mm) : formatLength(mm, unit));
 
   function snap(pt) { return { x: Math.round(pt.x / DRAW_SNAP) * DRAW_SNAP, y: Math.round(pt.y / DRAW_SNAP) * DRAW_SNAP }; }
 
@@ -1348,11 +1666,11 @@ function AddRoomModal({ initialRoom, onClose, onSave, displayUnit }) {
   }
 
   function closeShape() {
-    if (points.length < 3) { setDrawError("Add at least 3 corners before closing."); return; }
+    if (points.length < 3) { setDrawError("Add at least 3 corners before closing the shape."); return; }
     const last = points[points.length - 1];
     const start = points[0];
     if (last.x !== start.x && last.y !== start.y) {
-      setDrawError("Cannot close: the last corner doesn't line up with the start on either axis. Add another corner first.");
+      setDrawError("The last corner doesn't line up with the first one, so the shape can't close with a straight wall. Add one more corner first.");
       return;
     }
     const closingDir = directionBetween(last, start);
@@ -1362,12 +1680,39 @@ function AddRoomModal({ initialRoom, onClose, onSave, displayUnit }) {
     setStep("dims");
   }
 
+  function applyTemplate(t) {
+    const n = t.points.length;
+    const dirs = t.points.map((p, i) => directionBetween(p, t.points[(i + 1) % n]));
+    setPoints(t.points);
+    setDirections(dirs);
+    setLengths(dirs.map(() => ""));
+    setDrawError("");
+    setStep("dims");
+  }
+
+  // Going back to the drawing drops the automatic closing wall again, so the
+  // outline reopens exactly where the user left it.
+  function backToDraw() {
+    setDirections((d) => d.slice(0, -1));
+    setActiveWall(null);
+    setStep("draw");
+  }
+
   function undoPoint() {
     setPoints((p) => p.slice(0, -1));
     setDirections((d) => d.slice(0, -1));
     setDrawError("");
   }
   function resetDraw() { setPoints([]); setDirections([]); setDrawError(""); }
+
+  // Switching unit converts what's already typed instead of reinterpreting it.
+  function changeUnit(next) {
+    setLengths((ls) => ls.map((l) => {
+      const mm = parseLength(l, unit);
+      return mm == null ? l : toUnitString(mm, next);
+    }));
+    setUnit(next);
+  }
 
   // ---- dimension step ----
   const numericLengths = lengths.map((l) => parseLength(l, unit));
@@ -1380,7 +1725,7 @@ function AddRoomModal({ initialRoom, onClose, onSave, displayUnit }) {
       else if (d === "D") v += len; else if (d === "U") v -= len;
     });
     return { h, v };
-  }, [directions, JSON.stringify(numericLengths)]);
+  }, [directions, JSON.stringify(numericLengths)]); // eslint-disable-line
 
   const hBlanks = directions.map((d, i) => (isHorizontal(d) && numericLengths[i] == null ? i : -1)).filter((i) => i >= 0);
   const vBlanks = directions.map((d, i) => (!isHorizontal(d) && numericLengths[i] == null ? i : -1)).filter((i) => i >= 0);
@@ -1391,16 +1736,15 @@ function AddRoomModal({ initialRoom, onClose, onSave, displayUnit }) {
   if (hBlanks.length === 1) {
     const idx = hBlanks[0];
     const dir = directions[idx];
-    // remaining signed sum without this wall must be cancelled by it
     let sum = 0;
     directions.forEach((d, i) => { if (i === idx || !isHorizontal(d)) return; sum += d === "R" ? numericLengths[i] : -numericLengths[i]; });
     const needed = dir === "R" ? -sum : sum;
     if (needed > 0) { resolvedLengths[idx] = needed; calcIndexes.add(idx); }
-    else dimError = "Horizontal dimensions can't form a closed shape with these values.";
+    else dimError = "The horizontal walls can't form a closed shape with these values — check the side-to-side measurements.";
   } else if (hBlanks.length === 0 && directions.some(isHorizontal) && Math.abs(hSum) > EPS) {
-    dimError = `Horizontal dimensions are inconsistent by ${Math.round(Math.abs(hSum))}mm.`;
+    dimError = `The horizontal walls don't add up — they're off by ${showLen(Math.abs(hSum))}. Clear one and it'll be worked out for you.`;
   } else if (hBlanks.length > 1) {
-    dimError = `Enter all but one horizontal wall (${hBlanks.length} are still blank).`;
+    dimError = `Fill in all but one horizontal wall (${hBlanks.length} still blank).`;
   }
   if (!dimError) {
     if (vBlanks.length === 1) {
@@ -1410,11 +1754,11 @@ function AddRoomModal({ initialRoom, onClose, onSave, displayUnit }) {
       directions.forEach((d, i) => { if (i === idx || isHorizontal(d)) return; sum += d === "D" ? numericLengths[i] : -numericLengths[i]; });
       const needed = dir === "D" ? -sum : sum;
       if (needed > 0) { resolvedLengths[idx] = needed; calcIndexes.add(idx); }
-      else dimError = "Vertical dimensions can't form a closed shape with these values.";
+      else dimError = "The vertical walls can't form a closed shape with these values — check the top-to-bottom measurements.";
     } else if (vBlanks.length === 0 && directions.some((d) => !isHorizontal(d)) && Math.abs(vSum) > EPS) {
-      dimError = `Vertical dimensions are inconsistent by ${Math.round(Math.abs(vSum))}mm.`;
+      dimError = `The vertical walls don't add up — they're off by ${showLen(Math.abs(vSum))}. Clear one and it'll be worked out for you.`;
     } else if (vBlanks.length > 1) {
-      dimError = `Enter all but one vertical wall (${vBlanks.length} are still blank).`;
+      dimError = `Fill in all but one vertical wall (${vBlanks.length} still blank).`;
     }
   }
 
@@ -1423,6 +1767,7 @@ function AddRoomModal({ initialRoom, onClose, onSave, displayUnit }) {
   const previewVerts = canConstruct ? buildPolygon(directions, resolvedLengths) : null;
   const previewArea = previewVerts ? polygonArea(previewVerts) : 0;
   const previewBB = previewVerts ? boundingBox(previewVerts) : null;
+  const filledCount = numericLengths.filter((l) => l != null).length;
 
   const shapeVerts = previewVerts || (points.length > 0 ? points : (initialRoom ? buildPolygon(directions, initialRoom.wallLengths) : null));
 
@@ -1430,6 +1775,7 @@ function AddRoomModal({ initialRoom, onClose, onSave, displayUnit }) {
     if (!canConstruct || !name.trim()) return;
     const vertices = buildPolygon(directions, resolvedLengths);
     const bb = boundingBox(vertices);
+    const allowanceCm = parseFloat(allowance);
     onSave({
       id: initialRoom?.id || `room_${Date.now()}`,
       name: name.trim(),
@@ -1442,194 +1788,296 @@ function AddRoomModal({ initialRoom, onClose, onSave, displayUnit }) {
       corners: vertices.length,
       quantity: Math.max(1, parseInt(quantity) || 1),
       notes,
-      cuttingAllowance: allowance === "" ? null : parseFloat(allowance) * 10,
+      cuttingAllowance: allowance === "" || !isFinite(allowanceCm) ? null : allowanceCm * 10,
       grainDirection: grain,
+      isStairs,
       color: initialRoom?.color || ROOM_COLORS[Math.floor(Math.random() * ROOM_COLORS.length)],
-    });
+    }, unit);
+  }
+
+  function onWallKeyDown(e, i, part) {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    if (isFt && part === "ft") { inchInputs.current[i]?.focus(); return; }
+    const next = wallInputs.current[i + 1];
+    if (next) next.focus();
+    else if (canConstruct) setStep("details");
   }
 
   const drawPtsStr = points.map((p) => `${p.x},${p.y}`).join(" ");
   const previewLine = points.length > 0 && cursor ? `${points[points.length - 1].x},${points[points.length - 1].y} ${cursor.x},${cursor.y}` : "";
+  const cursorNearStart = points.length >= 3 && cursor && Math.hypot(cursor.x - points[0].x, cursor.y - points[0].y) < 18;
+
+  const steps = initialRoom
+    ? [["dims", "Wall lengths"], ["details", "Details"]]
+    : [["draw", "Shape"], ["dims", "Wall lengths"], ["details", "Details"]];
+  const stepIndex = steps.findIndex(([k]) => k === step);
 
   return (
-    <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
-      <div className="bg-[#f7f5f0] text-stone-800 rounded-xl w-full max-w-3xl max-h-[92vh] overflow-y-auto shadow-2xl border border-stone-300">
-        <div className="flex items-center justify-between px-5 py-3 border-b border-stone-300 bg-[#efece3]">
-          <div>
-            <h2 className="font-semibold text-sm tracking-wide uppercase flex items-center gap-2">
-              <Pencil size={15} /> {initialRoom ? "Edit Room" : "Add Room"}
-            </h2>
-            <div className="flex items-center gap-2 mt-1.5">
-              {[["draw", "Draw"], ["dims", "Dimensions"], ["details", "Details"]].map(([key, label], i) => {
-                const order = ["draw", "dims", "details"];
-                const active = step === key;
-                const done = order.indexOf(step) > i;
-                return (
-                  <div key={key} className="flex items-center gap-1.5">
-                    <span className={`w-4 h-4 rounded-full flex items-center justify-center text-[9px] font-mono ${active ? "bg-[#3c7a6f] text-white" : done ? "bg-[#3c7a6f]/30 text-[#3c7a6f]" : "bg-stone-300 text-stone-500"}`}>{done ? "✓" : i + 1}</span>
-                    <span className={`text-[10px] ${active ? "text-stone-700 font-medium" : "text-stone-400"}`}>{label}</span>
-                    {i < 2 && <span className="w-4 h-px bg-stone-300 ml-1" />}
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-          <button onClick={onClose} title="Close without saving" className="text-stone-500 hover:text-stone-800 hover:bg-stone-100 rounded-full p-1.5 transition-colors"><X size={18} /></button>
+    <Modal onClose={onClose} dismissible={false} className="max-w-4xl" labelledBy="room-modal-title">
+      {/* Header + stepper */}
+      <div className="flex items-start justify-between gap-4 px-5 sm:px-6 pt-5 pb-4 border-b border-stone-100">
+        <div className="min-w-0">
+          <h2 id="room-modal-title" className="text-lg font-semibold text-stone-900">{initialRoom ? `Edit “${initialRoom.name}”` : "Add a room"}</h2>
+          <ol className="flex items-center gap-2 mt-3 flex-wrap">
+            {steps.map(([key, label], i) => {
+              const active = i === stepIndex, done = i < stepIndex;
+              return (
+                <li key={key} className="flex items-center gap-2">
+                  <span className={cls("w-6 h-6 rounded-full grid place-items-center text-xs font-semibold transition-colors",
+                    active ? "bg-brand-500 text-white" : done ? "bg-brand-100 text-brand-700" : "bg-stone-100 text-stone-500")}>
+                    {done ? <Check size={12} strokeWidth={3} /> : i + 1}
+                  </span>
+                  <span className={cls("text-xs", active ? "text-stone-900 font-medium" : "text-stone-500")}>{label}</span>
+                  {i < steps.length - 1 && <span className="w-6 h-px bg-stone-200" />}
+                </li>
+              );
+            })}
+          </ol>
         </div>
+        <IconButton label="Close without saving" onClick={onClose}><X size={18} /></IconButton>
+      </div>
 
-        {step === "draw" && (
-          <div className="p-5">
-            <p className="text-xs text-stone-500 mb-3">Click to place each corner. Every wall snaps to horizontal or vertical automatically. Click back on the <span className="text-[#3c7a6f] font-medium">first corner (teal dot)</span> to close the shape.</p>
+      {/* Step 1 — shape */}
+      {step === "draw" && (
+        <>
+          <div className="flex-1 overflow-y-auto px-5 sm:px-6 py-5">
+            <p className="text-sm font-medium text-stone-800 mb-2.5">Start from a common shape</p>
+            <div className="grid grid-cols-3 gap-2.5 mb-6">
+              {SHAPE_TEMPLATES.map((t) => (
+                <button key={t.key} type="button" onClick={() => applyTemplate(t)}
+                  className={cls("group flex flex-col items-center gap-1.5 p-3 rounded-xl border border-stone-200 bg-white hover:border-brand-500 hover:bg-brand-50 transition-colors", FOCUS_RING)}>
+                  <RoomThumbnail vertices={t.points} color="#d93732" size={52} />
+                  <span className="text-xs font-medium text-stone-700 group-hover:text-brand-700">{t.label}</span>
+                </button>
+              ))}
+            </div>
+
+            <div className="flex items-baseline justify-between gap-3 mb-2.5">
+              <p className="text-sm font-medium text-stone-800">…or draw your own</p>
+              <p className="text-xs text-stone-600 hidden sm:block">Click to add corners · walls snap straight · click the <span className="text-brand-600 font-medium">green dot</span> to finish</p>
+            </div>
             <div className="relative">
               <svg
                 ref={svgRef}
                 viewBox={`0 0 ${DRAW_W} ${DRAW_H}`}
-                className="w-full bg-white border border-stone-300 rounded-xl cursor-crosshair select-none"
+                className="w-full bg-white border border-stone-200 rounded-xl cursor-crosshair select-none touch-none"
                 style={{ aspectRatio: `${DRAW_W}/${DRAW_H}` }}
                 onMouseMove={handleMove}
+                onMouseLeave={() => setCursor(null)}
                 onClick={handleClick}
               >
                 <defs>
                   <pattern id="dotgrid" width={DRAW_SNAP} height={DRAW_SNAP} patternUnits="userSpaceOnUse">
-                    <circle cx="1" cy="1" r="1" fill="#e3ded2" />
+                    <circle cx="1" cy="1" r="1.1" fill="#e7e5e4" />
                   </pattern>
                 </defs>
                 <rect width={DRAW_W} height={DRAW_H} fill="url(#dotgrid)" />
-                {points.length > 1 && <polyline points={drawPtsStr} fill="none" stroke="#c98a3a" strokeWidth="3" strokeLinejoin="round" />}
-                {previewLine && <polyline points={previewLine} fill="none" stroke="#3c7a6f" strokeWidth="2" strokeDasharray="6 4" />}
+                {points.length > 1 && <polyline points={drawPtsStr} fill="#d937320d" stroke="#d93732" strokeWidth="3" strokeLinejoin="round" />}
+                {previewLine && <polyline points={previewLine} fill="none" stroke="#57534e" strokeWidth="2" strokeDasharray="6 4" />}
                 {points.map((p, i) => (
                   <g key={i}>
-                    <circle cx={p.x} cy={p.y} r={i === 0 ? 8 : 6} fill={i === 0 ? "#3c7a6f" : "#c98a3a"} stroke="white" strokeWidth="2" />
-                    {i > 0 && <text x={p.x + 8} y={p.y - 8} fontSize="11" fill="#78716c" fontFamily="monospace">W{i}</text>}
+                    {i === 0 && points.length >= 3 && <circle cx={p.x} cy={p.y} r={cursorNearStart ? 16 : 13} fill="#d9373222" className="transition-all" />}
+                    <circle cx={p.x} cy={p.y} r={i === 0 ? 8 : 5.5} fill={i === 0 ? "#d93732" : "white"} stroke={i === 0 ? "white" : "#d93732"} strokeWidth="2.5" />
                   </g>
                 ))}
-                {cursor && <circle cx={cursor.x} cy={cursor.y} r="4" fill="#3c7a6f" opacity="0.6" />}
+                {cursor && !cursorNearStart && <circle cx={cursor.x} cy={cursor.y} r="4" fill="#57534e" />}
               </svg>
               {points.length === 0 && (
                 <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                  <span className="text-xs text-stone-400 bg-white/90 px-3 py-1.5 rounded-xl border border-stone-200">Click anywhere to place the first corner</span>
+                  <span className="flex items-center gap-2 text-xs text-stone-600 bg-white/95 px-3.5 py-2 rounded-full border border-stone-200 shadow-sm">
+                    <MousePointerClick size={14} className="text-brand-500" /> Click anywhere to place the first corner
+                  </span>
                 </div>
               )}
             </div>
-            {drawError && <div className="mt-2 text-xs text-red-600 flex items-center gap-1"><AlertTriangle size={13} />{drawError}</div>}
-            <div className="flex items-center gap-2 mt-3">
-              <button onClick={undoPoint} disabled={points.length === 0} title="Remove the last corner placed" className="px-3 py-1.5 text-xs border border-stone-300 rounded-xl disabled:opacity-40 flex items-center gap-1"><Undo size={13} /> Undo point</button>
-              <button onClick={resetDraw} disabled={points.length === 0} title="Clear this drawing and start over" className="px-3 py-1.5 text-xs border border-stone-300 rounded-xl disabled:opacity-40">Reset</button>
-              <button onClick={closeShape} disabled={points.length < 3} title="Finish the shape" className="ml-auto px-5 py-2 text-sm font-medium bg-[#3c7a6f] text-white rounded-xl disabled:opacity-40 flex items-center gap-1.5 shadow-sm transition-colors"><Check size={14} /> Close shape</button>
+            {drawError && <div className="mt-3"><Notice tone="error">{drawError}</Notice></div>}
+          </div>
+          <div className="flex items-center gap-2 px-5 sm:px-6 py-4 border-t border-stone-100 bg-stone-50/60">
+            <Button variant="ghost" size="sm" onClick={undoPoint} disabled={points.length === 0} title="Remove the last corner placed"><Undo size={14} /> Undo corner</Button>
+            <Button variant="ghost" size="sm" onClick={resetDraw} disabled={points.length === 0} title="Clear this drawing and start over">Start over</Button>
+            <Button variant="primary" className="ml-auto" onClick={closeShape} disabled={points.length < 3} title="Finish the shape">
+              Finish shape <ChevronRight size={16} />
+            </Button>
+          </div>
+        </>
+      )}
+
+      {/* Step 2 — wall lengths */}
+      {step === "dims" && (
+        <>
+          <div className="flex-1 overflow-y-auto px-5 sm:px-6 py-5">
+            <div className="grid md:grid-cols-[minmax(0,300px)_1fr] gap-5 md:gap-6">
+              <div className="md:sticky md:top-0 self-start">
+                <WallShapePreview
+                  vertices={shapeVerts} lengths={lengths} unit={unit} activeWall={activeWall}
+                  onPickWall={(i) => wallInputs.current[i]?.focus()}
+                />
+                <p className="text-xs text-stone-500 mt-2 text-center">Tap a number on the shape to jump to that wall</p>
+              </div>
+
+              <div className="min-w-0">
+                <div className="flex items-center justify-between gap-3 mb-1">
+                  <p className="text-sm font-medium text-stone-800">Measure each wall</p>
+                  <Segmented value={unit} onChange={changeUnit} options={[{ value: "m", label: "m" }, { value: "cm", label: "cm" }, { value: "mm", label: "mm" }, { value: "ft", label: "ft & in" }]} />
+                </div>
+                <p className="text-xs text-stone-600 mb-3.5 leading-relaxed">
+                  Tip: leave <b className="font-medium text-stone-700">one side-to-side</b> and <b className="font-medium text-stone-700">one top-to-bottom</b> wall blank and they'll be calculated for you. {isFt
+                    ? <>Sizes are converted to metres for the plan.</>
+                    : <>Mixed units like <code className="text-xs bg-stone-100 px-1 rounded">3m 45cm</code> work too.</>}
+                </p>
+                <div className="grid sm:grid-cols-2 gap-2">
+                  {directions.map((d, i) => {
+                    const Icon = DIR_ICON[d];
+                    const isActive = activeWall === i;
+                    const isCalc = calcIndexes.has(i);
+                    return (
+                      <label
+                        key={i}
+                        className={cls("flex items-center gap-2.5 h-11 bg-white border rounded-lg pl-2 pr-3 transition-colors cursor-text",
+                          isActive ? "border-brand-500 ring-2 ring-brand-500/20" : "border-stone-200 hover:border-stone-300")}
+                      >
+                        <span className={cls("w-6 h-6 rounded-full grid place-items-center text-xs font-semibold shrink-0", isActive ? "bg-brand-500 text-white" : "bg-stone-100 text-stone-600")}>{i + 1}</span>
+                        <Icon size={14} className="text-stone-500 shrink-0" aria-label={`Wall goes ${DIR_LABEL[d]}`} />
+                        {isFt ? (() => {
+                          const parts = splitFtIn(lengths[i]);
+                          const setPart = (key, v) => setLengths((ls) => ls.map((l, j) => {
+                            if (j !== i) return l;
+                            const p = splitFtIn(l);
+                            return joinFtIn(key === "ft" ? v : p.ft, key === "inch" ? v : p.inch);
+                          }));
+                          const box = "w-10 min-w-0 text-sm tabular-nums text-right border-0 outline-none bg-stone-50 rounded px-1.5 py-1 placeholder:text-stone-300 focus:bg-brand-50";
+                          return (
+                            <span className="flex-1 min-w-0 flex items-center gap-1">
+                              <input
+                                ref={(el) => (wallInputs.current[i] = el)}
+                                value={parts.ft} inputMode="decimal" aria-label={`Wall ${i + 1} feet`}
+                                onChange={(e) => setPart("ft", e.target.value.replace(/[^0-9.]/g, ""))}
+                                onFocus={() => setActiveWall(i)} onBlur={() => setActiveWall((a) => (a === i ? null : a))}
+                                onKeyDown={(e) => onWallKeyDown(e, i, "ft")}
+                                placeholder={isCalc ? "–" : "0"} className={box}
+                              />
+                              <span className="text-xs text-stone-500">ft</span>
+                              <input
+                                ref={(el) => (inchInputs.current[i] = el)}
+                                value={parts.inch} inputMode="decimal" aria-label={`Wall ${i + 1} inches`}
+                                onChange={(e) => setPart("inch", e.target.value.replace(/[^0-9.]/g, ""))}
+                                onFocus={() => setActiveWall(i)} onBlur={() => setActiveWall((a) => (a === i ? null : a))}
+                                onKeyDown={(e) => onWallKeyDown(e, i, "in")}
+                                placeholder={isCalc ? "–" : "0"} className={box + " ml-1"}
+                              />
+                              <span className="text-xs text-stone-500">in</span>
+                            </span>
+                          );
+                        })() : (
+                          <input
+                            ref={(el) => (wallInputs.current[i] = el)}
+                            value={lengths[i] ?? ""}
+                            inputMode="decimal"
+                            aria-label={`Wall ${i + 1} length`}
+                            onChange={(e) => setLengths((ls) => ls.map((l, j) => (j === i ? e.target.value : l)))}
+                            onFocus={() => setActiveWall(i)}
+                            onBlur={() => setActiveWall((a) => (a === i ? null : a))}
+                            onKeyDown={(e) => onWallKeyDown(e, i)}
+                            placeholder={isCalc ? "auto" : (isHorizontal(d) ? "Width" : "Length")}
+                            className="flex-1 min-w-0 text-sm tabular-nums border-0 outline-none bg-transparent placeholder:text-stone-300"
+                          />
+                        )}
+                        {isCalc
+                          ? <span className="text-xs font-medium text-brand-700 bg-brand-50 rounded px-1.5 py-0.5 shrink-0 tabular-nums">= {showLen(resolvedLengths[i])}</span>
+                          : !isFt && <span className="text-xs text-stone-500 shrink-0">{unit}</span>}
+                      </label>
+                    );
+                  })}
+                </div>
+
+                <div className="mt-4">
+                  {dimError ? (
+                    <Notice tone={dimError.includes("still blank") ? "info" : "warn"}>{dimError}</Notice>
+                  ) : canConstruct && previewBB ? (
+                    <Notice tone="success">
+                      <span className="font-medium">Looks good.</span>{" "}
+                      {formatLength(previewBB.maxX - previewBB.minX, "m")} × {formatLength(previewBB.maxY - previewBB.minY, "m")}
+                      {isFt && <> ({formatFtIn(previewBB.maxX - previewBB.minX)} × {formatFtIn(previewBB.maxY - previewBB.minY)})</>}
+                      {" "}· {formatArea(previewArea)} · {previewVerts.length} corners
+                    </Notice>
+                  ) : (
+                    <Notice tone="info">{filledCount} of {directions.length} walls entered.</Notice>
+                  )}
+                </div>
+              </div>
             </div>
           </div>
-        )}
+          <div className="flex items-center gap-2 px-5 sm:px-6 py-4 border-t border-stone-100 bg-stone-50/60">
+            {!initialRoom && <Button variant="ghost" onClick={backToDraw}><ChevronLeft size={16} /> Back</Button>}
+            <Button variant="primary" className="ml-auto" onClick={() => setStep("details")} disabled={!canConstruct}>Next <ChevronRight size={16} /></Button>
+          </div>
+        </>
+      )}
 
-        {step === "dims" && (
-          <div className="p-5">
-            <div className="flex items-center justify-between mb-3">
-              <p className="text-xs text-stone-500">Enter the real length of every wall — the shape on the left shows which side each number belongs to. Leave one wall per axis blank to have it calculated automatically.</p>
-              <select value={unit} onChange={(e) => setUnit(e.target.value)} className="text-xs border border-stone-300 rounded-xl px-2 py-1 bg-white shrink-0 ml-3">
-                <option value="mm">mm</option><option value="cm">cm</option><option value="m">m</option>
-              </select>
-            </div>
-            <div className="flex gap-4 items-start">
-              <div className="shrink-0">
-                <WallShapePreview vertices={shapeVerts} lengths={lengths} unit={unit} activeWall={activeWall} />
-                <p className="text-[10px] text-stone-400 mt-1 text-center w-[240px]">Click or focus a wall field to highlight it here</p>
-              </div>
-              <div className="flex-1 min-w-0 grid grid-cols-1 gap-2 max-h-64 overflow-y-auto pr-1">
-                {directions.map((d, i) => {
-                  const Icon = DIR_ICON[d];
-                  return (
-                    <div
-                      key={i}
-                      className={`flex items-center gap-2 bg-white border rounded-xl px-2 py-1.5 ${activeWall === i ? "border-[#3c7a6f] ring-1 ring-[#3c7a6f]/40" : "border-stone-300"}`}
-                    >
-                      <span className={`w-4 h-4 rounded-full flex items-center justify-center text-[9px] font-mono shrink-0 ${activeWall === i ? "bg-[#3c7a6f] text-white" : "bg-stone-200 text-stone-500"}`}>{i + 1}</span>
-                      <Icon size={14} className="text-[#c98a3a] shrink-0" />
-                      <input
-                        value={lengths[i]}
-                        onChange={(e) => setLengths((ls) => ls.map((l, j) => (j === i ? e.target.value : l)))}
-                        onFocus={() => setActiveWall(i)}
-                        onBlur={() => setActiveWall((a) => (a === i ? null : a))}
-                        placeholder={`e.g. 4${unit === "m" ? "" : "000"}${unit}`}
-                        className="flex-1 text-xs font-mono border-0 outline-none bg-transparent min-w-0"
-                      />
-                      {calcIndexes.has(i) && <span className="text-[10px] text-[#3c7a6f] font-mono shrink-0">calc: {formatLength(resolvedLengths[i], unit)}</span>}
+      {/* Step 3 — details */}
+      {step === "details" && (
+        <>
+          <div className="flex-1 overflow-y-auto px-5 sm:px-6 py-5">
+            <div className="grid md:grid-cols-[1fr_240px] gap-6">
+              <div className="space-y-4">
+                <Field label="Room name">
+                  <input
+                    value={name} onChange={(e) => setName(e.target.value)} autoFocus
+                    onKeyDown={(e) => { if (e.key === "Enter") handleSave(); }}
+                    className={INPUT} placeholder="e.g. Living room"
+                  />
+                </Field>
+                <div className="grid grid-cols-2 gap-4">
+                  <Field label={isStairs ? "How many steps?" : "How many?"} hint={isStairs ? "One piece and one gripper per step" : "Identical pieces to cut"}>
+                    <QtyStepper value={Math.max(1, parseInt(quantity) || 1)} onChange={setQuantity} />
+                  </Field>
+                  <Field label="Cutting allowance" hint="Leave blank to use the roll default">
+                    <div className="relative">
+                      <input value={allowance} onChange={(e) => setAllowance(e.target.value)} inputMode="decimal" placeholder="Default" className={INPUT + " pr-10"} />
+                      <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-stone-500">cm</span>
                     </div>
-                  );
-                })}
-              </div>
-            </div>
-            {dimError && <div className="mt-3 text-xs text-red-600 flex items-center gap-1 bg-red-50 border border-red-200 rounded-xl px-2 py-1.5"><AlertTriangle size={13} className="shrink-0" />{dimError}</div>}
-            {canConstruct && previewBB && (
-              <div className="mt-3 flex items-center gap-4 bg-[#efece3] rounded-xl p-3">
-                <div className="text-xs font-mono text-stone-600 space-y-0.5">
-                  <div>{formatLength(previewBB.maxX - previewBB.minX, unit)} × {formatLength(previewBB.maxY - previewBB.minY, unit)}</div>
-                  <div>Area: {formatArea(previewArea)}</div>
-                  <div>Corners: {previewVerts.length}</div>
+                  </Field>
                 </div>
+                <Field label="Notes (optional)">
+                  <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={2} placeholder="Doorway, underlay, fitting notes…" className={INPUT + " h-auto py-2 resize-none"} />
+                </Field>
+                <Toggle checked={isStairs} onChange={setIsStairs} label="This is stairs" description="Each step gets one full gripper instead of gripper around the edges." />
+                <Toggle checked={grain} onChange={setGrain} label="Show pile direction" description="Draws an arrow on this room in the cutting layout so the pile runs the right way." />
               </div>
-            )}
-            <div className="flex items-center gap-2 mt-4">
-              <button onClick={() => (initialRoom ? setStep("details") : setStep("draw"))} className="px-3 py-1.5 text-xs border border-stone-300 rounded-xl flex items-center gap-1"><ChevronLeft size={13} /> Back</button>
-              <button onClick={() => setStep("details")} disabled={!canConstruct} className="ml-auto px-5 py-2 text-sm font-medium bg-[#3c7a6f] text-white rounded-xl disabled:opacity-40 flex items-center gap-1.5 shadow-sm transition-colors">Next <ChevronRight size={14} /></button>
+              {previewVerts && (
+                <div className="bg-stone-50 border border-stone-200 rounded-xl p-4 flex flex-col items-center text-center self-start">
+                  <RoomThumbnail vertices={previewVerts} color={initialRoom?.color || "#d93732"} size={120} />
+                  <p className="text-sm font-medium text-stone-900 mt-2 truncate max-w-full">{name.trim() || "Untitled room"}</p>
+                  <p className="text-xs text-stone-600 tabular-nums mt-0.5">{formatLength(previewBB.maxX - previewBB.minX, "m")} × {formatLength(previewBB.maxY - previewBB.minY, "m")}</p>
+                  <p className="text-xs text-stone-600 tabular-nums">{formatArea(previewArea)}{parseInt(quantity) > 1 ? ` × ${parseInt(quantity)}` : ""}</p>
+                </div>
+              )}
             </div>
           </div>
-        )}
-
-        {step === "details" && (
-          <div className="p-5 space-y-3">
-            <Field label="Room name">
-              <input value={name} onChange={(e) => setName(e.target.value)} autoFocus className="w-full border border-stone-300 rounded-xl px-2 py-1.5 text-sm bg-white" placeholder="Living Room" />
-            </Field>
-            <div className="grid grid-cols-2 gap-3">
-              <Field label="Quantity">
-                <input type="number" min="1" value={quantity} onChange={(e) => setQuantity(e.target.value)} className="w-full border border-stone-300 rounded-xl px-2 py-1.5 text-sm bg-white font-mono" />
-              </Field>
-              <Field label="Cutting allowance (cm, optional)">
-                <input value={allowance} onChange={(e) => setAllowance(e.target.value)} placeholder="project default" className="w-full border border-stone-300 rounded-xl px-2 py-1.5 text-sm bg-white font-mono" />
-              </Field>
-            </div>
-            <Field label="Notes">
-              <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={2} className="w-full border border-stone-300 rounded-xl px-2 py-1.5 text-sm bg-white" />
-            </Field>
-            <label className="flex items-center gap-2 text-xs text-stone-600">
-              <input type="checkbox" checked={grain} onChange={(e) => setGrain(e.target.checked)} /> Show grain/pile direction arrow on this room
-            </label>
-            {previewVerts && (
-              <div className="flex items-center gap-4 bg-[#efece3] rounded-xl p-3">
-                <RoomThumbnail vertices={previewVerts} color="#c98a3a" size={64} />
-                <div className="text-xs font-mono text-stone-600 space-y-0.5">
-                  <div>{formatLength(previewBB.maxX - previewBB.minX, "m")} × {formatLength(previewBB.maxY - previewBB.minY, "m")}</div>
-                  <div>Area: {formatArea(previewArea)}</div>
-                </div>
-              </div>
-            )}
-            <div className="flex items-center gap-2 pt-2">
-              <button onClick={() => setStep("dims")} className="px-3 py-1.5 text-xs border border-stone-300 rounded-xl flex items-center gap-1"><ChevronLeft size={13} /> Back</button>
-              <button onClick={handleSave} disabled={!name.trim()} className="ml-auto px-5 py-2 text-sm font-medium bg-[#c98a3a] text-white rounded-xl disabled:opacity-40 flex items-center gap-1.5 shadow-sm transition-colors"><Check size={14} /> Save room</button>
-            </div>
+          <div className="flex items-center gap-2 px-5 sm:px-6 py-4 border-t border-stone-100 bg-stone-50/60">
+            <Button variant="ghost" onClick={() => setStep("dims")}><ChevronLeft size={16} /> Back</Button>
+            {!name.trim() && <span className="ml-auto text-xs text-stone-500 hidden sm:inline">Give the room a name to save it</span>}
+            <Button variant="primary" className={name.trim() ? "ml-auto" : "sm:ml-0 ml-auto"} onClick={handleSave} disabled={!name.trim()}><Check size={16} /> {initialRoom ? "Save changes" : "Add room"}</Button>
           </div>
-        )}
-      </div>
-    </div>
+        </>
+      )}
+    </Modal>
   );
 }
 
 /* ======================================================================
-   SECTION: LEFT SIDEBAR — rooms library + roll settings
+   SECTION: ROLL SETTINGS (shared by both views)
    ====================================================================== */
 
-function LeftSidebar({ rooms, onAddRoom, onEditRoom, onDeleteRoom, onDuplicateRoom, onQuantityChange, onPlaceOnCarpet, onUndoJoin, rollWidth, setRollWidth, unit, setUnit, tolerance, setTolerance, grainMode, setGrainMode, gridSize, setGridSize, snapEnabled, setSnapEnabled, allowOverlap, setAllowOverlap, guillotineMode, setGuillotineMode }) {
-  const [tab, setTab] = useState("rooms");
-  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+const ROLL_PRESETS = [3.66, 4.0, 5.0];
+
+function RollSettings({ rollWidth, setRollWidth, unit, setUnit, tolerance, setTolerance, grainMode, setGrainMode, gridSize, setGridSize, snapEnabled, setSnapEnabled, allowOverlap, setAllowOverlap, guillotineMode, setGuillotineMode }) {
 
   // The roll-width field keeps its own text buffer, separate from the
-  // committed rollWidth (mm) state. Committing on every keystroke used to
-  // mean a momentarily-empty field (e.g. while selecting the old value to
-  // retype it) parsed to 0, got clamped up to the 500mm minimum, and
-  // snapped the field to "0.5" mid-edit — so the next digit typed landed
-  // after that "0.5" instead of replacing it. Typing is now free-form and
-  // only parsed/clamped/committed on blur or Enter, like a normal number
-  // field; invalid or empty input just reverts the display to whatever
-  // rollWidth currently is, rather than forcing it to the minimum.
+  // committed rollWidth (mm) state, and only parses/clamps/commits on blur
+  // or Enter — so clearing the field to retype it never snaps it to the
+  // minimum mid-edit. Invalid or empty input reverts to the current width.
   const [rollWidthText, setRollWidthText] = useState(String(rollWidth / 1000));
   useEffect(() => { setRollWidthText(String(rollWidth / 1000)); }, [rollWidth]);
   function commitRollWidth() {
@@ -1640,149 +2088,81 @@ function LeftSidebar({ rooms, onAddRoom, onEditRoom, onDeleteRoom, onDuplicateRo
       setRollWidthText(String(rollWidth / 1000));
     }
   }
+
   return (
-    <div className="w-72 shrink-0 border-r border-stone-300 bg-[#efece3] flex flex-col h-full">
-      <div className="flex border-b border-stone-300 text-xs font-medium uppercase tracking-wide">
-        <button onClick={() => setTab("rooms")} className={`flex-1 py-2.5 ${tab === "rooms" ? "bg-[#f7f5f0] text-stone-800" : "text-stone-500"}`}>Rooms</button>
-        <button onClick={() => setTab("roll")} className={`flex-1 py-2.5 ${tab === "roll" ? "bg-[#f7f5f0] text-stone-800" : "text-stone-500"}`}>Roll Settings</button>
-      </div>
-
-      {tab === "rooms" && (
-        <div className="flex-1 overflow-y-auto p-3 space-y-2">
-          <button onClick={onAddRoom} title="Draw a new room shape" className="w-full flex items-center justify-center gap-2 py-3 text-sm font-semibold bg-[#3c7a6f] text-white rounded-xl hover:bg-[#336a60] shadow-sm transition-colors">
-            <Plus size={16} /> Add Room
-          </button>
-          {rooms.length === 0 && (
-            <div className="mt-3 bg-white border border-dashed border-stone-300 rounded-xl p-3.5">
-              <p className="text-xs font-semibold text-stone-700 mb-2">Get started in 3 steps</p>
-              <ol className="text-[11px] text-stone-500 space-y-1.5 list-decimal list-inside">
-                <li>Tap <b className="text-stone-700">Add Room</b> and draw its shape corner by corner</li>
-                <li>Type in each wall's real length</li>
-                <li>Set your roll width, then drag or place rooms onto the Cutting Plan</li>
-              </ol>
-            </div>
-          )}
-          {rooms.map((room) => (
-            <div key={room.id} className="bg-white border border-stone-300 rounded-xl p-2.5">
-              <div className="flex gap-2.5">
-                <div draggable onDragStart={(e) => e.dataTransfer.setData("roomId", room.id)} title="Drag onto the carpet canvas" className="cursor-grab active:cursor-grabbing relative">
-                  <RoomThumbnail vertices={room.vertices} color={room.color} />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-1.5">
-                    <span className="w-2 h-2 rounded-full shrink-0" style={{ background: room.color }} />
-                    <div className="text-sm font-medium truncate">{room.name}</div>
-                  </div>
-                  <div className="text-[11px] font-mono text-stone-500">{(room.width / 1000).toFixed(2)}m × {(room.length / 1000).toFixed(2)}m</div>
-                  <div className="text-[11px] font-mono text-stone-500">{formatArea(room.area)} · {room.corners} corners</div>
-                  <div className="flex items-center gap-1 mt-1.5">
-                    <span className="text-[10px] text-stone-400">Qty</span>
-                    <div className="flex items-center border border-stone-200 rounded-xl overflow-hidden">
-                      <button onClick={() => onQuantityChange(room.id, Math.max(1, room.quantity - 1))} title="Decrease quantity" className="px-1.5 py-0.5 text-stone-500 hover:bg-stone-100 leading-none">−</button>
-                      <input type="number" min="1" value={room.quantity} onChange={(e) => onQuantityChange(room.id, Math.max(1, parseInt(e.target.value) || 1))} className="w-8 text-[11px] font-mono text-center border-x border-stone-200 py-0.5" />
-                      <button onClick={() => onQuantityChange(room.id, room.quantity + 1)} title="Increase quantity" className="px-1.5 py-0.5 text-stone-500 hover:bg-stone-100 leading-none">+</button>
-                    </div>
-                  </div>
-                </div>
-              </div>
-              <button onClick={() => onPlaceOnCarpet(room)} title="Add one copy to the Cutting Plan canvas" className="w-full mt-2.5 flex items-center justify-center gap-1.5 py-2 text-xs font-medium bg-[#efece3] hover:bg-[#e5e0d3] text-stone-700 rounded-xl transition-colors">
-                <Layers size={13} /> Place on Carpet
-              </button>
-              <div className="flex items-center gap-2.5 mt-1.5 pt-1.5 border-t border-stone-100">
-                <button onClick={() => onEditRoom(room)} title="Edit this room" className="text-[11px] text-stone-500 hover:text-stone-800 flex items-center gap-1"><Pencil size={11} /> Edit</button>
-                <button onClick={() => onDuplicateRoom(room)} title="Duplicate this room" className="text-[11px] text-stone-500 hover:text-stone-800 flex items-center gap-1"><Copy size={11} /> Duplicate</button>
-                {room.joinOf && <button onClick={() => onUndoJoin(room.joinOf.id)} title="Put the original, unjoined room back" className="text-[11px] text-amber-700 hover:text-amber-900 flex items-center gap-1"><Undo size={11} /> Undo join</button>}
-                {confirmDeleteId === room.id ? (
-                  <span className="ml-auto flex items-center gap-1.5 text-[11px]">
-                    <span className="text-stone-500">Delete?</span>
-                    <button onClick={() => { onDeleteRoom(room.id); setConfirmDeleteId(null); }} className="text-red-600 font-semibold hover:underline">Yes</button>
-                    <button onClick={() => setConfirmDeleteId(null)} className="text-stone-400 hover:underline">No</button>
-                  </span>
-                ) : (
-                  <button onClick={() => setConfirmDeleteId(room.id)} title="Delete this room" className="ml-auto text-[11px] text-red-500 hover:text-red-700 flex items-center gap-1"><Trash2 size={11} /> Delete</button>
-                )}
-              </div>
-            </div>
-          ))}
-          {rooms.length > 0 && <p className="text-[10px] text-stone-400 pt-2">Drag a card onto the carpet, or use "Place on Carpet" for a quick, always-valid drop you can then fine-tune.</p>}
+    <div className="space-y-4">
+      <Field label="Roll width" hint="How wide the carpet roll is. Most rolls are 4m or 5m.">
+        <div className="relative">
+          <input
+            type="number" step="0.01" min="0.5" value={rollWidthText} inputMode="decimal"
+            onChange={(e) => setRollWidthText(e.target.value)}
+            onBlur={commitRollWidth}
+            onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
+            className={INPUT + " pr-9 tabular-nums font-medium"}
+          />
+          <span className="absolute right-3 top-1/2 -translate-y-1/2 text-sm text-stone-500">m</span>
         </div>
-      )}
+        <div className="flex gap-1.5 mt-2">
+          {ROLL_PRESETS.map((w) => {
+            const active = Math.round(w * 1000) === rollWidth;
+            return (
+              <button key={w} type="button" onClick={() => setRollWidth(Math.round(w * 1000))} title={`Set roll width to ${w}m`}
+                className={cls("flex-1 text-xs font-medium h-7 rounded-md border transition-colors", FOCUS_RING,
+                  active ? "bg-brand-50 border-brand-500 text-brand-700" : "bg-white border-stone-200 text-stone-600 hover:border-stone-300")}>
+                {w}m
+              </button>
+            );
+          })}
+        </div>
+      </Field>
 
-      {tab === "roll" && (
-        <div className="flex-1 overflow-y-auto p-4 space-y-4">
-          <Field label="Carpet roll width">
-            <div className="flex items-center gap-2">
-              <input
-                type="number" step="0.01" value={rollWidthText}
-                onChange={(e) => setRollWidthText(e.target.value)}
-                onBlur={commitRollWidth}
-                onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
-                className="flex-1 border border-stone-300 rounded-xl px-3 py-2 text-sm font-mono bg-white"
-              />
-              <span className="text-sm text-stone-500">m</span>
-            </div>
-            <div className="flex gap-1.5 mt-2">
-              {[3.66, 4.0, 5.0].map((w) => (
-                <button key={w} onClick={() => setRollWidth(Math.round(w * 1000))} title={`Set roll width to ${w}m`} className="text-xs font-medium px-2.5 py-1 rounded-full bg-stone-100 hover:bg-stone-200 transition-colors">{w}m</button>
-              ))}
-            </div>
-          </Field>
-          <Field label="Display unit">
-            <select value={unit} onChange={(e) => setUnit(e.target.value)} className="w-full border border-stone-300 rounded-xl px-3 py-2 text-sm bg-white">
-              <option value="mm">Millimetres</option><option value="cm">Centimetres</option><option value="m">Metres</option>
+      <Field label="Show measurements in">
+        <Segmented className="w-full" value={unit} onChange={setUnit} options={[{ value: "mm", label: "mm" }, { value: "cm", label: "cm" }, { value: "m", label: "metres" }]} />
+      </Field>
+
+      <div className="border-t border-stone-100" />
+
+      {(
+        <div className="space-y-4">
+          <Field label="Gap around each piece" hint="Extra allowance kept clear between pieces for trimming.">
+            <select value={tolerance} onChange={(e) => setTolerance(parseInt(e.target.value))} className={SELECT}>
+              {[0, 1, 2.5, 5, 10].map((cm) => <option key={cm} value={cm * 10}>{cm === 0 ? "None" : `${cm} cm`}</option>)}
             </select>
           </Field>
-
-          <div className="pt-2 border-t border-stone-200" />
-
-          {(
-            <div className="space-y-4 pt-1">
-              <Field label="Extra allowance around each piece">
-                <select value={tolerance} onChange={(e) => setTolerance(parseInt(e.target.value))} className="w-full border border-stone-300 rounded-xl px-3 py-2 text-sm bg-white">
-                  {[0, 1, 2.5, 5, 10].map((cm) => <option key={cm} value={cm * 10}>{cm === 0 ? "None" : `${cm}cm`}</option>)}
-                </select>
-              </Field>
-              <Field label="Rotating pieces">
-                <select value={grainMode} onChange={(e) => setGrainMode(e.target.value)} className="w-full border border-stone-300 rounded-xl px-3 py-2 text-sm bg-white">
-                  <option value="free">Turn any amount</option>
-                  <option value="90">Turn in 90° steps only</option>
-                  <option value="locked">Don't allow turning</option>
-                </select>
-              </Field>
-              <Field label="Snap-to grid">
-                <div className="flex items-center gap-2">
-                  <select value={gridSize} onChange={(e) => setGridSize(parseInt(e.target.value))} className="flex-1 border border-stone-300 rounded-xl px-3 py-2 text-sm bg-white">
-                    {[10, 25, 50, 100].map((v) => <option key={v} value={v}>{v}mm</option>)}
-                  </select>
-                  <label className="flex items-center gap-1.5 text-xs text-stone-600">
-                    <input type="checkbox" checked={snapEnabled} onChange={(e) => setSnapEnabled(e.target.checked)} /> On
-                  </label>
-                </div>
-              </Field>
-              <div className="pt-1 border-t border-stone-200">
-                <label className="flex items-center gap-2 text-xs text-stone-700 pt-3 cursor-pointer">
-                  <input type="checkbox" checked={guillotineMode} onChange={(e) => setGuillotineMode(e.target.checked)} />
-                  Auto Arrange: keep cuts easy to make by hand
-                </label>
-                <p className="text-[10px] text-stone-400 mt-1">
-                  {guillotineMode
-                    ? "On by default: every cut Auto Arrange produces runs straight across the piece it's cutting from — easy with a knife and rule, though it may use a little more carpet."
-                    : "Pieces can nest into any gap, including the notch of an L-shaped room, for the tightest possible fit — but the cut lines between pieces may not be straight."}
-                </p>
-              </div>
-              <div>
-                <label className="flex items-center gap-2 text-xs text-stone-700 cursor-pointer">
-                  <input type="checkbox" checked={allowOverlap} onChange={(e) => setAllowOverlap(e.target.checked)} />
-                  Allow pieces to overlap
-                </label>
-                <p className="text-[10px] text-stone-400 mt-1">
-                  {allowOverlap
-                    ? "Pieces can be placed on top of each other — overlapping ones are outlined red until you move them apart."
-                    : "Off by default: pieces snap back to the last clear spot if they'd overlap another room."}
-                </p>
-              </div>
+          <Field label="Turning pieces">
+            <select value={grainMode} onChange={(e) => setGrainMode(e.target.value)} className={SELECT}>
+              <option value="free">Turn any amount</option>
+              <option value="90">Turn in 90° steps only</option>
+              <option value="locked">Don't allow turning (keep pile direction)</option>
+            </select>
+          </Field>
+          <Field label="Snap to grid">
+            <div className="flex items-center gap-3">
+              <select value={gridSize} onChange={(e) => setGridSize(parseInt(e.target.value))} disabled={!snapEnabled} className={SELECT + " flex-1 disabled:opacity-50"}>
+                {[10, 25, 50, 100].map((v) => <option key={v} value={v}>{v} mm</option>)}
+              </select>
+              <button type="button" role="switch" aria-checked={snapEnabled} aria-label="Snap to grid" onClick={() => setSnapEnabled(!snapEnabled)}
+                className={cls("relative w-9 h-5 shrink-0 rounded-full transition-colors", FOCUS_RING, snapEnabled ? "bg-brand-500" : "bg-stone-300")}>
+                <span className={cls("absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform", snapEnabled && "translate-x-4")} />
+              </button>
             </div>
-          )}
+          </Field>
+          <div className="pt-3 border-t border-stone-100 space-y-4">
+            <Toggle
+              checked={guillotineMode} onChange={setGuillotineMode}
+              label="Straight cuts only"
+              description={guillotineMode
+                ? "“Arrange for me” keeps every cut running straight across — easy with a knife and rule, though it may use a little more carpet."
+                : "“Arrange for me” can nest pieces into any gap (even the notch of an L-shape) for the tightest fit, but cuts may not be straight."}
+            />
+            <Toggle
+              checked={allowOverlap} onChange={setAllowOverlap}
+              label="Allow pieces to overlap"
+              description={allowOverlap
+                ? "Pieces can be dropped on top of each other — overlaps are outlined in red until you move them apart."
+                : "Pieces snap back to the last clear spot if they'd overlap another room."}
+            />
+          </div>
         </div>
       )}
     </div>
@@ -1790,45 +2170,364 @@ function LeftSidebar({ rooms, onAddRoom, onEditRoom, onDeleteRoom, onDuplicateRo
 }
 
 /* ======================================================================
-   SECTION: RIGHT SIDEBAR — selected instance inspector
+   SECTION: ROOMS VIEW — the room library
    ====================================================================== */
 
-function RightSidebar({ instance, room, onRotate, onDelete, onDuplicate, onAllowanceChange, unit }) {
-  if (!instance || !room) {
-    return (
-      <div className="w-64 shrink-0 border-l border-stone-300 bg-[#efece3] p-4">
-        <p className="text-xs text-stone-500">Select a room piece on the carpet to see its details, or drag a room from the library onto the canvas.</p>
-      </div>
-    );
-  }
-  const verts = instanceVertices(room, instance);
-  const bb = boundingBox(verts);
+// Warm-tinted elevation (matches the ivory page rather than flat grey).
+const CARD = "bg-white rounded-2xl ring-1 ring-stone-900/[0.06] shadow-[0_1px_2px_rgba(60,40,30,0.05),0_8px_24px_-12px_rgba(60,40,30,0.12)]";
+
+function PlacedBadge({ placed, quantity }) {
+  const done = placed >= quantity;
   return (
-    <div className="w-64 shrink-0 border-l border-stone-300 bg-[#efece3] p-4 space-y-3">
-      <div className="flex items-center gap-2">
-        <span className="w-3 h-3 rounded-xl" style={{ background: room.color }} />
-        <h3 className="text-sm font-semibold truncate">{room.name}</h3>
-      </div>
-      <div className="text-xs font-mono text-stone-600 space-y-1 bg-white border border-stone-200 rounded-xl p-2.5">
-        <div className="flex justify-between"><span className="text-stone-400">Size</span><span>{formatLength(bb.maxX - bb.minX, unit)} × {formatLength(bb.maxY - bb.minY, unit)}</span></div>
-        <div className="flex justify-between"><span className="text-stone-400">Area</span><span>{formatArea(room.area)}</span></div>
-        <div className="flex justify-between"><span className="text-stone-400">Position</span><span>{Math.round(instance.x)}, {Math.round(instance.y)}mm</span></div>
-        <div className="flex justify-between"><span className="text-stone-400">Rotation</span><span>{instance.rotation}°</span></div>
-      </div>
-      <Field label="Cutting allowance override (cm)">
-        <input
-          value={instance.allowanceOverride != null && instance.allowanceOverride !== "" ? parseFloat(instance.allowanceOverride) / 10 : ""}
-          onChange={(e) => onAllowanceChange(e.target.value === "" ? "" : String(parseFloat(e.target.value) * 10))}
-          placeholder="project default" className="w-full border border-stone-300 rounded-xl px-2 py-1.5 text-xs font-mono bg-white"
-        />
-      </Field>
-      {room.grainDirection && <div className="text-[11px] text-[#3c7a6f] flex items-center gap-1"><ArrowUp size={12} style={{ transform: `rotate(${instance.rotation}deg)` }} /> Grain direction shown on canvas</div>}
-      <div className="grid grid-cols-2 gap-2 pt-1">
-        <button onClick={onRotate} title="Rotate 90° (shortcut: R)" className="flex items-center justify-center gap-1.5 text-xs font-medium rounded-xl py-2 bg-stone-100 hover:bg-stone-200 transition-colors"><RotateCw size={14} /> Rotate 90°</button>
-        <button onClick={onDuplicate} title="Duplicate this piece" className="flex items-center justify-center gap-1.5 text-xs font-medium rounded-xl py-2 bg-stone-100 hover:bg-stone-200 transition-colors"><Copy size={14} /> Duplicate</button>
-        <button onClick={onDelete} title="Remove (shortcut: Delete)" className="col-span-2 flex items-center justify-center gap-1.5 text-xs font-medium text-red-600 rounded-xl py-2 bg-red-50 hover:bg-red-100 transition-colors"><Trash2 size={14} /> Remove from carpet</button>
+    <span className={cls("inline-flex items-center gap-1 text-xs font-medium tabular-nums",
+      done ? "text-emerald-700" : placed > 0 ? "text-amber-700" : "text-stone-500")}>
+      {done ? <CheckCircle2 size={13} /> : <CircleDashed size={13} />}
+      {done ? (quantity > 1 ? `All ${quantity} on the roll` : "On the roll") : `${placed} of ${quantity} on the roll`}
+    </span>
+  );
+}
+
+// The one big, unmistakable "add a room" control.
+function AddRoomButton({ onClick, size = "lg" }) {
+  const big = size === "lg";
+  return (
+    <button
+      type="button" onClick={onClick} aria-label="Add a room"
+      className={cls("group mx-auto grid place-items-center rounded-full bg-brand-600 text-white transition-all duration-200",
+        "shadow-[0_14px_32px_-12px_rgba(142,27,34,0.65)] hover:bg-brand-700 hover:shadow-[0_18px_36px_-12px_rgba(142,27,34,0.7)] hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.97]",
+        "focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-brand-500/30",
+        big ? "w-28 h-28" : "w-16 h-16")}
+    >
+      <Plus size={big ? 46 : 28} strokeWidth={2.25} className="transition-transform duration-200 group-hover:rotate-90" />
+    </button>
+  );
+}
+
+function ShapeShortcuts({ onPick }) {
+  return (
+    <div className="flex items-center justify-center gap-2.5">
+      {SHAPE_TEMPLATES.map((t) => (
+        <button
+          key={t.key} type="button" onClick={() => onPick(t)} title={`Start with a ${t.label.toLowerCase()} room`}
+          className={cls("flex items-center gap-2 h-11 pl-2 pr-3.5 rounded-xl bg-white ring-1 ring-stone-900/[0.08] text-sm font-medium text-stone-700",
+            "hover:ring-brand-500/50 hover:text-brand-700 active:scale-[0.98] transition-all", FOCUS_RING)}
+        >
+          <RoomThumbnail vertices={t.points} color="#b8282a" size={28} />
+          {t.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function EmptyRooms({ onAddRoom, onOpenHelp }) {
+  return (
+    <div className="flex-1 min-h-0 overflow-y-auto">
+      <div className="min-h-full grid place-items-center px-6 py-12">
+        <div className="text-center animate-fade-in">
+          <AddRoomButton onClick={() => onAddRoom()} />
+          <p className="mt-6 text-xl font-semibold text-stone-900">Add a room</p>
+          <p className="mt-1 text-sm text-stone-600 max-w-[30ch] mx-auto [text-wrap:balance]">Start with the first room you want to carpet.</p>
+
+          <div className="mt-10">
+            <p className="text-xs text-stone-500 mb-3">or start from a shape</p>
+            <ShapeShortcuts onPick={onAddRoom} />
+          </div>
+
+          <button type="button" onClick={onOpenHelp} className={cls("mt-10 inline-flex items-center gap-1.5 text-sm text-stone-600 underline decoration-stone-300 underline-offset-4 hover:text-stone-900 hover:decoration-stone-500 transition-colors", FOCUS_RING)}>
+            <HelpCircle size={15} /> How does this work?
+          </button>
+        </div>
       </div>
     </div>
+  );
+}
+
+function RoomCard({ room, placed, unit, onUndoJoin, onEdit, onDuplicate, onDelete, onQuantityChange, onPlace }) {
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  return (
+    <article className={cls(CARD, "group flex flex-col overflow-hidden transition-shadow hover:shadow-[0_1px_2px_rgba(60,40,30,0.06),0_14px_32px_-14px_rgba(60,40,30,0.22)]")}>
+      <button type="button" onClick={onEdit} title="Change this room" className={cls("relative h-40 bg-stone-50 grid place-items-center", FOCUS_RING)}>
+        <RoomThumbnail vertices={room.vertices} color={room.color} size={124} />
+        <span className="absolute bottom-3 right-3 opacity-0 group-hover:opacity-100 transition-opacity text-xs font-medium text-stone-700 bg-white/90 rounded-md px-2 py-1 flex items-center gap-1"><Pencil size={12} /> Change</span>
+      </button>
+      <div className="px-5 pt-4 pb-5 flex-1 flex flex-col">
+        <h3 className="text-base font-semibold text-stone-900 truncate">{room.name}</h3>
+        <p className="text-sm text-stone-600 tabular-nums mt-0.5">{formatLength(room.width, unit)} × {formatLength(room.length, unit)} <span className="text-stone-400">·</span> {formatArea(room.area)}</p>
+        {room.notes && <p className="text-xs text-stone-500 mt-1.5 line-clamp-2">{room.notes}</p>}
+        {room.joinOf && (
+          <p className="text-xs text-amber-800 mt-1.5 flex items-center gap-1.5">
+            Part of a join
+            <button type="button" onClick={() => onUndoJoin(room.joinOf.id)} title="Put the original, unjoined room back" className={cls("inline-flex items-center gap-1 font-medium underline underline-offset-2 decoration-amber-300 hover:text-amber-950", FOCUS_RING)}><Undo size={12} /> Undo join</button>
+          </p>
+        )}
+
+        <div className="flex items-center justify-between mt-4">
+          <span className="text-sm text-stone-700">{room.isStairs ? "Steps" : "How many"}</span>
+          <QtyStepper value={room.quantity} onChange={(q) => onQuantityChange(room.id, q)} />
+        </div>
+        <div className="mt-2"><PlacedBadge placed={placed} quantity={room.quantity} /></div>
+
+        <div className="mt-auto pt-4">
+          {confirmDelete ? (
+            <div className="flex items-center gap-2 animate-fade-in">
+              <span className="text-sm text-stone-700 flex-1 min-w-0">Delete this room?</span>
+              <Button variant="ghost" size="sm" onClick={() => setConfirmDelete(false)}>Keep</Button>
+              <Button variant="danger" size="sm" onClick={() => { onDelete(room.id); setConfirmDelete(false); }}>Delete</Button>
+            </div>
+          ) : (
+            <div className="flex items-center gap-1">
+              {placed < room.quantity && (
+                <Button variant="secondary" size="sm" className="h-9" onClick={() => onPlace(room)} title="Put the missing pieces back on the carpet roll"><Layers size={14} /> Put back on roll</Button>
+              )}
+              <IconButton label="Make a copy of this room" onClick={() => onDuplicate(room)} className="ml-auto"><Copy size={16} /></IconButton>
+              <IconButton label="Delete room" onClick={() => setConfirmDelete(true)} className="hover:!text-red-600 hover:!bg-red-50"><Trash2 size={16} /></IconButton>
+            </div>
+          )}
+        </div>
+      </div>
+    </article>
+  );
+}
+
+function AddRoomTile({ onAddRoom }) {
+  return (
+    <div className="rounded-2xl bg-stone-100/70 min-h-[300px] flex flex-col items-center justify-center gap-4 px-5 py-8 text-center">
+      <AddRoomButton onClick={() => onAddRoom()} size="md" />
+      <div>
+        <p className="text-base font-semibold text-stone-900">Add a room</p>
+        <p className="text-sm text-stone-600 mt-0.5">Another room that needs carpet</p>
+      </div>
+    </div>
+  );
+}
+
+function RoomsView({ grippers, gripperSub, onUndoJoin, lengthLabel, projectName, setProjectName, onOpenHelp, rooms, placedByRoom, unit, onAddRoom, onEditRoom, onDeleteRoom, onDuplicateRoom, onQuantityChange, onPlaceOnCarpet, onPlaceAll, onGoToLayout, settings, totals }) {
+  if (rooms.length === 0) return <EmptyRooms onAddRoom={onAddRoom} onOpenHelp={onOpenHelp} />;
+  const remaining = totals.needed - totals.placed;
+  return (
+    <div className="flex-1 min-h-0 overflow-y-auto">
+      <div className="max-w-[1320px] mx-auto px-4 sm:px-8 pt-6 pb-16 grid lg:grid-cols-[minmax(0,1fr)_340px] gap-8 lg:gap-10">
+        <section className="min-w-0">
+          <div className="mb-5">
+            <ProjectNameField projectName={projectName} setProjectName={setProjectName} />
+          </div>
+          <div className="grid sm:grid-cols-2 xl:grid-cols-3 gap-5">
+            <AddRoomTile onAddRoom={onAddRoom} />
+            {rooms.map((room) => (
+              <RoomCard
+                key={room.id} room={room} placed={placedByRoom[room.id] || 0} unit={unit} onUndoJoin={onUndoJoin}
+                onEdit={() => onEditRoom(room)} onDuplicate={onDuplicateRoom} onDelete={onDeleteRoom}
+                onQuantityChange={onQuantityChange} onPlace={() => onPlaceAll(true)}
+              />
+            ))}
+          </div>
+        </section>
+
+        <aside className="space-y-5 lg:sticky lg:top-6 self-start">
+          <section className="rounded-2xl bg-ink-900 text-white p-5">
+            <p className="font-display text-xs font-semibold uppercase tracking-[0.22em] text-stone-400">Next</p>
+            <p className="text-lg font-semibold mt-1">Plan the cut</p>
+            <dl className="mt-4 grid grid-cols-2 gap-3">
+              <div>
+                <dt className="text-xs text-stone-400">On the roll</dt>
+                <dd className="text-xl font-semibold tabular-nums mt-0.5">{totals.placed} <span className="text-sm font-normal text-stone-400">{totals.placed === 1 ? "piece" : "pieces"}</span></dd>
+              </div>
+              <div>
+                <dt className="text-xs text-stone-400">Carpet needed</dt>
+                <dd className="text-xl font-semibold tabular-nums mt-0.5">{lengthLabel}</dd>
+              </div>
+              <div className="col-span-2 pt-3 border-t border-white/10">
+                <dt className="text-xs text-stone-400">Grippers needed</dt>
+                <dd className="text-xl font-semibold tabular-nums mt-0.5">{grippers} <span className="text-sm font-normal text-stone-400">{gripperSub}</span></dd>
+              </div>
+            </dl>
+            {remaining > 0 && (
+              <button type="button" onClick={() => onPlaceAll(true)} className={cls("mt-3 text-sm text-stone-300 underline decoration-white/30 underline-offset-4 hover:text-white", FOCUS_RING)}>
+                Put the other {remaining} back on the roll
+              </button>
+            )}
+            <Button variant="primary" className="w-full h-11 mt-5" onClick={onGoToLayout}>Open the plan <ArrowRight size={16} /></Button>
+          </section>
+          <section className={cls(CARD, "p-5")}>
+            <h2 className="text-base font-semibold text-stone-900 mb-4">Carpet roll</h2>
+            <RollSettings {...settings} />
+          </section>
+        </aside>
+      </div>
+    </div>
+  );
+}
+
+/* ======================================================================
+   SECTION: CUTTING VIEW SIDE PANELS
+   ====================================================================== */
+
+function RoomTray({ rooms, placedByRoom, onPlaceOnCarpet, onPlaceAll, onAddRoom, remaining }) {
+  return (
+    <aside className="hidden md:flex w-64 shrink-0 flex-col bg-white border-r border-stone-200 min-h-0">
+      <div className="flex items-center justify-between px-4 h-12 border-b border-stone-100 shrink-0">
+        <h2 className="text-sm font-semibold text-stone-900">Rooms</h2>
+        <IconButton label="Add a room" onClick={onAddRoom} className="w-8 h-8"><Plus size={16} /></IconButton>
+      </div>
+      <div className="flex-1 overflow-y-auto p-3 space-y-1.5">
+        {rooms.length === 0 && (
+          <div className="text-center px-3 py-8">
+            <p className="text-sm text-stone-600 font-medium">No rooms yet</p>
+            <p className="text-xs text-stone-500 mt-1 mb-4">Add a room to start laying out your carpet.</p>
+            <Button variant="primary" size="sm" onClick={onAddRoom}><Plus size={14} /> Add room</Button>
+          </div>
+        )}
+        {remaining > 0 && (
+          <Button variant="secondary" size="sm" className="w-full mb-2" onClick={onPlaceAll}><Layers size={13} /> Place all {remaining} remaining</Button>
+        )}
+        {rooms.map((room) => {
+          const placed = placedByRoom[room.id] || 0;
+          return (
+            <div
+              key={room.id}
+              draggable
+              onDragStart={(e) => { e.dataTransfer.setData("roomId", room.id); e.dataTransfer.effectAllowed = "copy"; }}
+              title="Drag onto the roll"
+              className="group flex items-center gap-2.5 p-2 rounded-lg border border-transparent hover:border-stone-200 hover:bg-stone-50 cursor-grab active:cursor-grabbing transition-colors"
+            >
+              <div className="w-11 h-11 rounded-md bg-stone-50 border border-stone-100 grid place-items-center shrink-0">
+                <RoomThumbnail vertices={room.vertices} color={room.color} size={38} />
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-medium text-stone-800 truncate">{room.name}</p>
+                <p className={cls("text-xs tabular-nums", placed >= room.quantity ? "text-emerald-600" : "text-stone-500")}>
+                  {placed}/{room.quantity} placed
+                </p>
+              </div>
+              <IconButton label={`Place one ${room.name} on the carpet`} onClick={() => onPlaceOnCarpet(room)} className="w-8 h-8 text-brand-600 hover:bg-brand-50 hover:text-brand-700"><Plus size={16} /></IconButton>
+            </div>
+          );
+        })}
+      </div>
+      {rooms.length > 0 && (
+        <p className="text-xs text-stone-500 px-4 py-3 border-t border-stone-100 leading-snug">Drag a room onto the roll, or press <b className="font-medium text-stone-600">+</b> to add it below the others.</p>
+      )}
+    </aside>
+  );
+}
+
+function StatTile({ label, value, sub, tone }) {
+  return (
+    <div className="rounded-lg bg-stone-50 border border-stone-100 px-3 py-2.5">
+      <p className="text-xs text-stone-600">{label}</p>
+      <p className={cls("text-base font-semibold tabular-nums mt-0.5", tone === "accent" ? "text-brand-600" : "text-stone-900")}>{value}</p>
+      {sub && <p className="text-xs text-stone-500 tabular-nums">{sub}</p>}
+    </div>
+  );
+}
+
+function AllowanceOverrideInput({ instance, onChange }) {
+  const current = instance.allowanceOverride != null && instance.allowanceOverride !== "" ? String(parseFloat(instance.allowanceOverride) / 10) : "";
+  const [text, setText] = useState(current);
+  useEffect(() => { setText(current); }, [current, instance.id]);
+  // Commit on blur / Enter only, so typing "2.5" isn't mangled mid-way and
+  // each edit is one undo step rather than one per keystroke.
+  function commit() {
+    const t = text.trim();
+    if (t === "") { if (current !== "") onChange(""); return; }
+    const v = parseFloat(t);
+    if (isFinite(v) && v >= 0) { if (String(v) !== current) onChange(String(v * 10)); }
+    else setText(current);
+  }
+  return (
+    <div className="relative">
+      <input
+        value={text} inputMode="decimal" placeholder="Roll default"
+        onChange={(e) => setText(e.target.value)} onBlur={commit}
+        onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
+        className={INPUT + " pr-10"}
+      />
+      <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-stone-500">cm</span>
+    </div>
+  );
+}
+
+function Inspector({ instance, room, onRotate, onDelete, onDuplicate, onAllowanceChange, onEditRoom, onDeselect, unit, rotationLocked }) {
+  const verts = instanceVertices(room, instance);
+  const bb = boundingBox(verts);
+  const rows = [
+    ["Size", `${formatLength(bb.maxX - bb.minX, unit)} × ${formatLength(bb.maxY - bb.minY, unit)}`],
+    ["Area", formatArea(room.area)],
+    ["From left edge", formatLength(instance.x, unit)],
+    ["From roll start", formatLength(instance.y, unit)],
+    ["Rotation", `${instance.rotation}°`],
+  ];
+  return (
+    <div className="p-4 space-y-4 animate-fade-in">
+      <div className="flex items-start gap-3">
+        <div className="w-12 h-12 rounded-lg bg-stone-50 border border-stone-100 grid place-items-center shrink-0">
+          <RoomThumbnail vertices={rotatePolygon(room.vertices, instance.rotation)} color={room.color} size={42} />
+        </div>
+        <div className="min-w-0 flex-1">
+          <p className="text-xs text-stone-600">Selected piece</p>
+          <h3 className="text-sm font-semibold text-stone-900 truncate">{room.name}</h3>
+        </div>
+        <IconButton label="Deselect (Esc)" onClick={onDeselect} className="w-8 h-8 -mr-1 -mt-1"><X size={15} /></IconButton>
+      </div>
+
+      <dl className="text-xs rounded-lg border border-stone-100 divide-y divide-stone-100">
+        {rows.map(([k, v]) => (
+          <div key={k} className="flex justify-between gap-3 px-3 py-2">
+            <dt className="text-stone-600">{k}</dt><dd className="text-stone-900 font-medium tabular-nums text-right">{v}</dd>
+          </div>
+        ))}
+      </dl>
+
+      <div className="grid grid-cols-2 gap-2">
+        <Button variant="secondary" size="sm" className="h-9" onClick={onRotate} disabled={rotationLocked} title={rotationLocked ? "Turning is switched off in roll settings" : "Rotate 90° (R)"}><RotateCw size={14} /> Rotate</Button>
+        <Button variant="secondary" size="sm" className="h-9" onClick={onDuplicate} title="Duplicate this piece"><Copy size={14} /> Duplicate</Button>
+      </div>
+
+      <Field label="Cutting allowance for this piece" hint="Overrides the roll's gap setting for this piece only.">
+        <AllowanceOverrideInput instance={instance} onChange={onAllowanceChange} />
+      </Field>
+
+      {room.grainDirection && (
+        <p className="text-xs text-brand-700 bg-brand-50 rounded-lg px-3 py-2 flex items-center gap-2">
+          <ArrowUp size={13} style={{ transform: `rotate(${instance.rotation}deg)` }} /> Pile direction is shown on the roll
+        </p>
+      )}
+
+      <div className="space-y-2 pt-1">
+        <Button variant="ghost" size="sm" className="w-full h-9" onClick={() => onEditRoom(room)}><Pencil size={14} /> Edit room shape</Button>
+        <Button variant="dangerSoft" size="sm" className="w-full h-9" onClick={onDelete} title="Remove from carpet (Delete)"><Trash2 size={14} /> Remove from carpet</Button>
+      </div>
+    </div>
+  );
+}
+
+function LayoutSidebar({ selectedInstance, selectedRoom, inspectorProps, stats, settings }) {
+  return (
+    <aside className="hidden lg:flex w-80 shrink-0 flex-col bg-white border-l border-stone-200 min-h-0 overflow-y-auto">
+      {selectedInstance && selectedRoom ? (
+        <Inspector instance={selectedInstance} room={selectedRoom} {...inspectorProps} />
+      ) : (
+        <div className="p-4 space-y-5">
+          <div>
+            <ProjectNameField projectName={stats.projectName} setProjectName={stats.setProjectName} />
+            <h2 className="text-sm font-semibold text-stone-900 mt-3 mb-3">Summary</h2>
+            <div className="grid grid-cols-2 gap-2">
+              <StatTile label="Carpet to buy" value={stats.lengthLabel} sub={`× ${(stats.rollWidth / 1000).toFixed(2)}m roll`} tone="accent" />
+              <StatTile label="Pieces placed" value={`${stats.placed}/${stats.needed}`} sub={stats.placed < stats.needed ? `${stats.needed - stats.placed} to go` : "All placed"} />
+              <StatTile label="Carpet used" value={stats.usedLabel} sub={`of ${stats.areaLabel}`} />
+              <StatTile label="Offcut waste" value={stats.wastePctLabel} sub={stats.wasteLabel} />
+              <div className="col-span-2"><StatTile label="Grippers needed (1.5m each)" value={stats.grippers} sub={stats.gripperSub} /></div>
+            </div>
+            <p className="text-xs text-stone-500 mt-3 flex items-start gap-1.5 leading-snug"><MousePointerClick size={13} className="shrink-0 mt-px" /> Click a piece on the roll to rotate, duplicate or remove it.</p>
+          </div>
+          <div className="pt-4 border-t border-stone-100">
+            <h2 className="text-sm font-semibold text-stone-900 mb-3 flex items-center gap-2"><Ruler size={14} className="text-stone-500" /> Carpet roll</h2>
+            <RollSettings {...settings} />
+          </div>
+        </div>
+      )}
+    </aside>
   );
 }
 
@@ -1836,10 +2535,11 @@ function RightSidebar({ instance, room, onRotate, onDelete, onDuplicate, onAllow
    SECTION: CUTTING CANVAS
    ====================================================================== */
 
-function CuttingCanvas({ rooms, roomsById, instances, setInstances, rollWidth, tolerance, gridSize, snapEnabled, selectedId, setSelectedId, commitHistory, allowOverlap, grainMode, onPlanWithJoin }) {
+function CuttingCanvas({ rooms, roomsById, instances, setInstances, rollWidth, tolerance, gridSize, snapEnabled, selectedId, setSelectedId, commitHistory, allowOverlap, stats, onAutoArrange, arranging, onPlaceAll, onGoToRooms, selectionActions, rotationLocked, grainMode, onPlanWithJoin }) {
   const containerRef = useRef(null);
   const [pxPerMm, setPxPerMm] = useState(0.09);
   const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [dragOver, setDragOver] = useState(false);
   const dragState = useRef(null);
   const rafId = useRef(null);
   const pendingMouse = useRef(null);
@@ -1850,10 +2550,8 @@ function CuttingCanvas({ rooms, roomsById, instances, setInstances, rollWidth, t
   function screenToMm(clientX, clientY) {
     const el = containerRef.current;
     const rect = el.getBoundingClientRect();
-    // Scroll offset has to be added back in — the bounding rect is always
-    // relative to the viewport, regardless of how far the container itself
-    // has been scrolled, so without this a scrolled view would misplace
-    // every drag by exactly however much had been scrolled.
+    // The bounding rect is viewport-relative regardless of how far the
+    // container has scrolled, so the scroll offset has to be added back in.
     const x = (clientX - rect.left - pan.x + el.scrollLeft) / pxPerMm;
     const y = (clientY - rect.top - pan.y + el.scrollTop) / pxPerMm;
     return { x, y };
@@ -1863,9 +2561,9 @@ function CuttingCanvas({ rooms, roomsById, instances, setInstances, rollWidth, t
 
   function effectiveTolerance(inst) { return inst.allowanceOverride != null && inst.allowanceOverride !== "" ? parseFloat(inst.allowanceOverride) : tolerance; }
 
-  // Every placed piece that currently overlaps another piece, or falls
-  // outside the roll width, is flagged persistently — not just while it's
-  // being dragged — so collisions stay visible until resolved.
+  // Every placed piece that overlaps another or falls outside the roll width
+  // is flagged persistently (not just while dragging) until it's resolved.
+  // Rooms too wide for the roll in every allowed rotation.
   const oversizeRooms = useMemo(() => {
     const seen = new Set(), out = [];
     instances.forEach((inst) => {
@@ -1886,9 +2584,6 @@ function CuttingCanvas({ rooms, roomsById, instances, setInstances, rollWidth, t
     return s;
   }, [instances, roomsById, rollWidth, tolerance]); // eslint-disable-line
 
-  // Grid lines are cheap individually but there can be hundreds of them —
-  // memoised so a drag (which updates instance positions, not the grid)
-  // never has to rebuild this list on every frame.
   const gridLinesX = useMemo(() => {
     if (!snapEnabled) return [];
     return Array.from({ length: Math.floor(rollWidth / gridSize) }, (_, i) => i);
@@ -1898,13 +2593,8 @@ function CuttingCanvas({ rooms, roomsById, instances, setInstances, rollWidth, t
     return Array.from({ length: Math.floor(canvasLenMm / gridSize) }, (_, i) => i);
   }, [snapEnabled, canvasLenMm, gridSize]);
 
-  // Magnetic snap to the roll's boundaries (left edge x=0, right edge
-  // x=rollWidth, start of the roll y=0) AND to the edges of other pieces
-  // already on the carpet, so two pieces dragged close together lock
-  // together with their edges exactly touching rather than left with an
-  // awkward sliver gap or nudged into a (rejected) overlap. Each axis snaps
-  // independently to whichever candidate is nearest, within a small
-  // real-mm threshold that's independent of grid snapping.
+  // Magnetic snap to the roll's edges and to the edges of other pieces, so
+  // pieces dragged close together lock with their edges exactly touching.
   const EDGE_SNAP_MM = 40;
   function snapToEdges(x, y, w, h, excludeId) {
     let nx = x, ny = y, bestXDist = EDGE_SNAP_MM, bestYDist = EDGE_SNAP_MM;
@@ -1920,15 +2610,15 @@ function CuttingCanvas({ rooms, roomsById, instances, setInstances, rollWidth, t
       const yOverlaps = y < obb.maxY && y + h > obb.minY;
       const xOverlaps = x < obb.maxX && x + w > obb.minX;
       if (yOverlaps) {
-        const dRight = Math.abs(x - obb.maxX); // this piece's left touching the other's right
+        const dRight = Math.abs(x - obb.maxX);
         if (dRight <= bestXDist) { bestXDist = dRight; nx = obb.maxX; }
-        const dLeft = Math.abs(x + w - obb.minX); // this piece's right touching the other's left
+        const dLeft = Math.abs(x + w - obb.minX);
         if (dLeft <= bestXDist) { bestXDist = dLeft; nx = obb.minX - w; }
       }
       if (xOverlaps) {
-        const dBottom = Math.abs(y - obb.maxY); // this piece's top touching the other's bottom
+        const dBottom = Math.abs(y - obb.maxY);
         if (dBottom <= bestYDist) { bestYDist = dBottom; ny = obb.maxY; }
-        const dTop = Math.abs(y + h - obb.minY); // this piece's bottom touching the other's top
+        const dTop = Math.abs(y + h - obb.minY);
         if (dTop <= bestYDist) { bestYDist = dTop; ny = obb.minY - h; }
       }
     });
@@ -1937,6 +2627,7 @@ function CuttingCanvas({ rooms, roomsById, instances, setInstances, rollWidth, t
 
   function onDropRoom(e) {
     e.preventDefault();
+    setDragOver(false);
     const roomId = e.dataTransfer.getData("roomId");
     const room = roomsById[roomId];
     if (!room) return;
@@ -1965,25 +2656,25 @@ function CuttingCanvas({ rooms, roomsById, instances, setInstances, rollWidth, t
     setInstances(next); commitHistory(next); setSelectedId(newInst.id);
   }
 
+  // Pointer events (rather than mouse-only) so pieces can be dragged with a
+  // finger or pen as well as a mouse.
   function beginDrag(e, inst) {
+    if (e.pointerType === "mouse" && e.button !== 0) return;
     e.stopPropagation();
+    e.preventDefault();
     setSelectedId(inst.id);
     const startMm = screenToMm(e.clientX, e.clientY);
-    dragState.current = { id: inst.id, offsetX: startMm.x - inst.x, offsetY: startMm.y - inst.y, lastValid: { x: inst.x, y: inst.y } };
+    dragState.current = { id: inst.id, offsetX: startMm.x - inst.x, offsetY: startMm.y - inst.y, lastValid: { x: inst.x, y: inst.y }, moved: false, startX: e.clientX, startY: e.clientY };
     pendingMouse.current = { clientX: e.clientX, clientY: e.clientY };
-    window.addEventListener("mousemove", onDragMove);
-    window.addEventListener("mouseup", onDragEnd);
-    // A continuous per-frame loop (rather than only reacting to mousemove)
-    // is what lets autoscroll keep going even while the mouse holds still
-    // near the bottom edge — a mousemove-only loop would stop scrolling the
-    // instant the cursor stops moving, even though it's still past the edge.
+    window.addEventListener("pointermove", onDragMove);
+    window.addEventListener("pointerup", onDragEnd);
+    window.addEventListener("pointercancel", onDragEnd);
+    // A continuous per-frame loop keeps autoscroll going even while the
+    // pointer holds still near the edge of the canvas.
     rafId.current = requestAnimationFrame(processDragFrame);
   }
 
-  // Fast mouse movement can fire far more mousemove events than the app can
-  // usefully process (each move re-checks collisions against every other
-  // room), so only the latest position is kept here; the actual work runs
-  // in the continuous per-frame loop below instead of once per raw event.
+  // Only the latest pointer position is kept; the real work runs once per frame.
   function onDragMove(e) {
     if (!dragState.current) return;
     pendingMouse.current = { clientX: e.clientX, clientY: e.clientY };
@@ -1996,9 +2687,16 @@ function CuttingCanvas({ rooms, roomsById, instances, setInstances, rollWidth, t
     const mouse = pendingMouse.current;
     if (!ds || !mouse) { rafId.current = null; return; }
 
-    // Autoscroll: if the cursor is held near the top/bottom (or left/right)
-    // edge of the visible canvas while dragging, scroll that direction so
-    // the piece can keep moving toward carpet that's off-screen below.
+    // A plain click (no real movement) just selects — it shouldn't nudge
+    // the piece onto the grid or record an undo step.
+    if (!ds.moved) {
+      if (Math.hypot(mouse.clientX - ds.startX, mouse.clientY - ds.startY) < 3) {
+        rafId.current = requestAnimationFrame(processDragFrame);
+        return;
+      }
+      ds.moved = true;
+    }
+
     const el = containerRef.current;
     if (el) {
       const rect = el.getBoundingClientRect();
@@ -2021,8 +2719,6 @@ function CuttingCanvas({ rooms, roomsById, instances, setInstances, rollWidth, t
     let nx = snapVal(mm.x - ds.offsetX);
     let ny = Math.max(0, snapVal(mm.y - ds.offsetY));
     setInstances((prev) => {
-      // Re-check: the drag may have ended (or the piece been deleted) while
-      // this frame's work was queued, so never trust the outer closure alone.
       if (!dragState.current || dragState.current.id !== ds.id) return prev;
       const instPrev = prev.find((i) => i.id === ds.id);
       if (!instPrev) return prev;
@@ -2044,13 +2740,14 @@ function CuttingCanvas({ rooms, roomsById, instances, setInstances, rollWidth, t
   }
 
   function onDragEnd() {
-    window.removeEventListener("mousemove", onDragMove);
-    window.removeEventListener("mouseup", onDragEnd);
+    window.removeEventListener("pointermove", onDragMove);
+    window.removeEventListener("pointerup", onDragEnd);
+    window.removeEventListener("pointercancel", onDragEnd);
     if (rafId.current != null) { cancelAnimationFrame(rafId.current); rafId.current = null; }
     pendingMouse.current = null;
     const ds = dragState.current;
-    dragState.current = null; // clear before any async state work touches it
-    if (!ds) return;
+    dragState.current = null;
+    if (!ds || !ds.moved) return;
     const { id, lastValid } = ds;
     if (!allowOverlap) {
       // Strict mode: snap back to the last spot that didn't collide.
@@ -2060,28 +2757,27 @@ function CuttingCanvas({ rooms, roomsById, instances, setInstances, rollWidth, t
         return next;
       });
     } else {
-      // Overlap allowed: keep wherever it was dropped, collision or not —
-      // it stays flagged red via invalidIds until the user resolves it.
+      // Overlap allowed: keep it where dropped; it stays flagged red until resolved.
       setInstances((prev) => { commitHistory(prev); return prev; });
     }
   }
 
   function zoom(delta) { setPxPerMm((z) => Math.min(0.4, Math.max(0.02, z * delta))); }
+  // Fits the whole roll — its full width AND everything placed on it — into view.
   function fitToScreen() {
-    const rect = containerRef.current.getBoundingClientRect();
-    setPxPerMm(Math.max(0.02, (rect.width - 60) / rollWidth));
-    setPan({ x: 30, y: 30 });
+    const el = containerRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const byWidth = (rect.width - 120) / rollWidth;
+    const byLength = (rect.height - 120) / Math.max(requiredLength(instances, roomsById), 2000);
+    setPxPerMm(Math.min(0.4, Math.max(0.02, Math.min(byWidth, byLength))));
+    setPan({ x: 44, y: 34 });
+    el.scrollTop = 0; el.scrollLeft = 0;
   }
-  useEffect(() => { fitToScreen(); }, []); // eslint-disable-line
+  useEffect(() => { fitToScreen(); }, [rollWidth]); // eslint-disable-line
 
-  // Ctrl/Cmd + scroll wheel (also how browsers report trackpad pinch
-  // gestures) zooms, mirroring the magnifying-glass buttons. A plain
-  // wheel is left alone so it still scrolls/pans the canvas normally —
-  // important since the roll can run far longer than the viewport.
-  // Needs a real (non-passive) listener rather than React's onWheel prop,
-  // since React attaches wheel handlers as passive by default and a
-  // passive listener can't preventDefault() the browser's own
-  // ctrl+wheel page-zoom.
+  // Ctrl/Cmd + wheel (and trackpad pinch) zooms; a plain wheel still scrolls.
+  // Needs a non-passive listener so the browser's own page zoom can be blocked.
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
@@ -2101,119 +2797,193 @@ function CuttingCanvas({ rooms, roomsById, instances, setInstances, rollWidth, t
   for (let m = 0; m * 1000 <= rollWidth; m++) metreTicks.push(m);
   const lengthTicks = [];
   for (let m = 0; m * 1000 <= canvasLenMm; m++) lengthTicks.push(m);
+  const selectedInst = instances.find((i) => i.id === selectedId);
+  const selectedRoomName = selectedInst ? roomsById[selectedInst.roomId]?.name : null;
 
   return (
-    <div className="flex-1 flex flex-col bg-[#2b2926] min-w-0">
-      <div className="flex items-center gap-2 px-3 py-2 border-b border-black/30 bg-[#242220] text-stone-300">
-        <span className="text-[11px] font-mono uppercase tracking-wider text-[#e0a527]">Roll width: {(rollWidth / 1000).toFixed(2)}m</span>
-        <span className="text-[11px] font-mono text-stone-400">Required length: {(reqLength / 1000).toFixed(2)}m</span>
-        <span className="text-[10px] text-stone-500 ml-3 hidden md:inline">Click a piece to select · drag to move · R to rotate · Delete to remove</span>
+    <div className="flex-1 flex flex-col min-w-0 min-h-0">
+      {/* Toolbar */}
+      <div className="shrink-0 flex flex-wrap items-center gap-x-5 gap-y-2 px-4 py-2 min-h-[48px] bg-white border-b border-stone-200">
+        <div className="flex items-baseline gap-1.5">
+          <span className="text-xs text-stone-600">Carpet needed</span>
+          <span className="text-base font-semibold text-brand-600 tabular-nums">{stats.lengthLabel}</span>
+          <span className="text-xs text-stone-500 tabular-nums">× {(rollWidth / 1000).toFixed(2)}m</span>
+        </div>
+        <div className="hidden sm:flex items-baseline gap-1.5">
+          <span className="text-xs text-stone-600">Waste</span>
+          <span className="text-sm font-medium text-stone-800 tabular-nums">{stats.wastePctLabel}</span>
+        </div>
         {invalidIds.size > 0 && (
-          <span title={allowOverlap ? "Overlap is allowed — resolve when ready" : "These will snap clear once you move them"} className="text-[11px] font-mono text-red-400 flex items-center gap-1 ml-3">
+          <span title={allowOverlap ? "Overlaps are allowed — move pieces apart or use “Arrange for me” to fix them" : "These will snap clear once you move them"}
+            className="inline-flex items-center gap-1.5 text-xs font-medium text-red-700 bg-red-50 border border-red-100 rounded-full px-2.5 py-1">
             <AlertTriangle size={12} /> {invalidIds.size} overlapping
           </span>
         )}
         {oversizeRooms.map((r) => (
-          <span key={r.id} className="text-[11px] font-mono text-amber-300 flex items-center gap-1.5 ml-3">
-            <AlertTriangle size={12} /> {r.name} is wider than the roll
-            <button onClick={() => onPlanWithJoin(r.id)} title="Split into narrower pieces joined after cutting, then re-arrange" className="px-2 py-0.5 rounded-full bg-amber-400/20 hover:bg-amber-400/30 text-amber-200">Plan with a join</button>
+          <span key={r.id} className="inline-flex items-center gap-2 text-xs font-medium text-amber-900 bg-amber-50 ring-1 ring-amber-200 rounded-lg pl-2.5 pr-1 py-1">
+            <AlertTriangle size={13} className="text-amber-600" /> {r.name} is wider than the roll
+            <button type="button" onClick={() => onPlanWithJoin(r.id)} title="Split into narrower pieces that are joined after cutting, then re-arrange"
+              className={cls("h-7 px-2.5 rounded-md bg-amber-600 text-white hover:bg-amber-700 active:scale-[0.98] transition", FOCUS_RING)}>
+              Plan with a join
+            </button>
           </span>
         ))}
-        <div className="ml-auto flex items-center gap-1">
-          <button onClick={() => zoom(0.85)} title="Zoom out" className="p-2 hover:bg-white/10 rounded-full transition-colors"><ZoomOut size={14} /></button>
-          <button onClick={() => zoom(1.18)} title="Zoom in" className="p-2 hover:bg-white/10 rounded-full transition-colors"><ZoomIn size={14} /></button>
-          <button onClick={fitToScreen} title="Fit to screen" className="p-2 hover:bg-white/10 rounded-full transition-colors"><Maximize2 size={14} /></button>
+        <div className="ml-auto flex items-center gap-2">
+          <Button
+            variant="primary" onClick={onAutoArrange} disabled={arranging || instances.length === 0}
+            title="Search for the shortest layout using each room's exact shape — the current plan is only replaced by a better one"
+          >
+            {arranging ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />}
+            {arranging ? "Working it out…" : "Arrange for me"}
+          </Button>
         </div>
       </div>
-      <div
-        ref={containerRef}
-        className="flex-1 overflow-auto relative"
-        onDragOver={(e) => e.preventDefault()}
-        onDrop={onDropRoom}
-        onMouseDown={() => setSelectedId(null)}
-        style={{
-          backgroundImage: "repeating-linear-gradient(-45deg, rgba(255,255,255,0.015) 0px, rgba(255,255,255,0.015) 1px, transparent 1px, transparent 6px)",
-        }}
-      >
+
+      {/* Canvas */}
+      <div className="relative flex-1 min-h-0">
+        <div
+          ref={containerRef}
+          className={cls("absolute inset-0 overflow-auto bg-stone-100 transition-shadow", dragOver && "ring-4 ring-inset ring-brand-500/30")}
+          onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; if (!dragOver) setDragOver(true); }}
+          onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) setDragOver(false); }}
+          onDrop={onDropRoom}
+          onPointerDown={() => setSelectedId(null)}
+          style={{ backgroundImage: "radial-gradient(#d6d3d1 1px, transparent 1px)", backgroundSize: "18px 18px" }}
+        >
+          <svg width={widthPx + 110} height={lenPx + 70} className="select-none">
+            <defs>
+              <pattern id="weave" width="8" height="8" patternUnits="userSpaceOnUse">
+                <path d="M0 0L8 8M8 0L0 8" stroke="#e7dfd0" strokeWidth="0.7" />
+              </pattern>
+              <marker id="arrow" markerWidth="6" markerHeight="6" refX="3" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#1c1917" /></marker>
+              <filter id="rollShadow" x="-5%" y="-5%" width="110%" height="110%"><feDropShadow dx="0" dy="1" stdDeviation="2" floodColor="#000" floodOpacity="0.12" /></filter>
+            </defs>
+            <g transform={`translate(${pan.x},${pan.y})`}>
+              {/* carpet body */}
+              <rect x={0} y={0} width={widthPx} height={lenPx} fill="#f6f1e7" stroke="#d6cdbd" strokeWidth="1" filter="url(#rollShadow)" />
+              <rect x={0} y={0} width={widthPx} height={lenPx} fill="url(#weave)" />
+              {/* grid */}
+              {gridLinesX.map((i) => (
+                <line key={"gx" + i} x1={i * gridSize * pxPerMm} y1={0} x2={i * gridSize * pxPerMm} y2={lenPx} stroke="#e2d9c8" strokeWidth="0.5" opacity="0.6" />
+              ))}
+              {gridLinesY.map((i) => (
+                <line key={"gy" + i} x1={0} y1={i * gridSize * pxPerMm} x2={widthPx} y2={i * gridSize * pxPerMm} stroke="#e2d9c8" strokeWidth="0.5" opacity="0.6" />
+              ))}
+              {/* top ruler */}
+              {metreTicks.map((m) => (
+                <g key={"tm" + m}>
+                  <line x1={m * 1000 * pxPerMm} y1={-7} x2={m * 1000 * pxPerMm} y2={0} stroke="#a8a29e" strokeWidth="1" />
+                  <text x={m * 1000 * pxPerMm} y={-11} fontSize="10" textAnchor="middle" fill="#78716c">{m}m</text>
+                </g>
+              ))}
+              {/* left ruler */}
+              {lengthTicks.map((m) => (
+                <g key={"lm" + m}>
+                  <line x1={-7} y1={m * 1000 * pxPerMm} x2={0} y2={m * 1000 * pxPerMm} stroke="#a8a29e" strokeWidth="1" />
+                  <text x={-11} y={m * 1000 * pxPerMm + 3.5} fontSize="10" textAnchor="end" fill="#78716c">{m}m</text>
+                </g>
+              ))}
+              {/* required-length marker */}
+              {reqLength > 0 && (
+                <g>
+                  <line x1={0} y1={reqLength * pxPerMm} x2={widthPx} y2={reqLength * pxPerMm} stroke="#b8282a" strokeWidth="1.5" strokeDasharray="6 4" />
+                  <g transform={`translate(${widthPx + 6},${reqLength * pxPerMm})`}>
+                    <rect x={0} y={-10} width={58} height={20} rx={10} fill="#b8282a" />
+                    <text x={29} y={4} fontSize="10.5" fontWeight="600" textAnchor="middle" fill="white">{(reqLength / 1000).toFixed(2)}m</text>
+                  </g>
+                </g>
+              )}
+
+              {instances.map((inst) => {
+                const room = roomsById[inst.roomId];
+                if (!room) return null;
+                const verts = instanceVertices(room, inst);
+                const pts = verts.map((v) => `${v.x * pxPerMm},${v.y * pxPerMm}`).join(" ");
+                const isSelected = selectedId === inst.id;
+                const isInvalid = invalidIds.has(inst.id);
+                const bb = boundingBox(verts);
+                const pcx = (bb.minX + bb.maxX) / 2 * pxPerMm, pcy = (bb.minY + bb.maxY) / 2 * pxPerMm;
+                const pw = (bb.maxX - bb.minX) * pxPerMm, ph = (bb.maxY - bb.minY) * pxPerMm;
+                const showSize = ph > 38 && pw > 60;
+                const showName = pw > 34 && ph > 16;
+                return (
+                  <g key={inst.id} onPointerDown={(e) => beginDrag(e, inst)} style={{ cursor: "grab", touchAction: "none" }}>
+                    <polygon
+                      points={pts}
+                      fill={isInvalid ? "#dc262633" : room.color + (isSelected ? "66" : "4d")}
+                      stroke={isInvalid ? "#dc2626" : isSelected ? "#1c1917" : room.color}
+                      strokeWidth={isSelected ? 2.5 : isInvalid ? 2 : 1.5}
+                      strokeDasharray={isInvalid ? "7 4" : undefined}
+                      strokeLinejoin="round"
+                    />
+                    {room.grainDirection && (
+                      (() => {
+                        const ax = bb.minX * pxPerMm + 16, ay = bb.minY * pxPerMm + (isInvalid ? 40 : 20);
+                        return <line x1={ax} y1={ay + 9} x2={ax} y2={ay - 9} stroke="#1c1917" strokeOpacity="0.6" strokeWidth="1.5" markerEnd="url(#arrow)" transform={`rotate(${inst.rotation} ${ax} ${ay})`} />;
+                      })()
+                    )}
+                    {showName && (
+                      <text x={pcx} y={showSize ? pcy - 3 : pcy + 4} fontSize="11.5" fontWeight="600" fill="#1c1917" textAnchor="middle" style={{ pointerEvents: "none" }}>{room.name}</text>
+                    )}
+                    {showSize && (
+                      <text x={pcx} y={pcy + 12} fontSize="10" fill="#44403c" textAnchor="middle" style={{ pointerEvents: "none" }}>
+                        {formatLength(bb.maxX - bb.minX, "m")} × {formatLength(bb.maxY - bb.minY, "m")}
+                      </text>
+                    )}
+                    {isInvalid && (
+                      <g transform={`translate(${bb.minX * pxPerMm + 11},${bb.minY * pxPerMm + 11})`} style={{ pointerEvents: "none" }}>
+                        <circle r="8" fill="#dc2626" />
+                        <text x="0" y="3.5" fontSize="10" fontWeight="bold" textAnchor="middle" fill="white">!</text>
+                      </g>
+                    )}
+                  </g>
+                );
+              })}
+            </g>
+          </svg>
+        </div>
+
+        {/* Empty state */}
         {instances.length === 0 && (
-          <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
-            <div className="text-center text-stone-400 bg-[#242220]/90 border border-dashed border-stone-600 rounded-xl px-6 py-5">
-              <Layers size={22} className="mx-auto mb-2 text-[#e0a527]" />
-              <p className="text-xs font-medium text-stone-300">Drag a room here from the library</p>
-              <p className="text-[11px] mt-1">or click "Place on Carpet" on a room card</p>
+          <div className="absolute inset-0 flex items-center justify-center pointer-events-none p-4">
+            <div className="pointer-events-auto text-center bg-white/90 backdrop-blur-sm rounded-2xl ring-1 ring-stone-900/[0.06] shadow-[0_18px_40px_-18px_rgba(60,40,30,0.35)] px-8 py-7 max-w-sm">
+              {rooms.length > 0 ? (
+                <>
+                  <p className="text-lg font-semibold text-stone-900">The roll is empty</p>
+                  <p className="text-sm text-stone-600 mt-1 [text-wrap:balance]">Put all your rooms on it in one go, then press “Arrange for me”.</p>
+                  <Button variant="primary" className="mt-5 h-11 px-5" onClick={onPlaceAll}>Put all rooms on the roll <ArrowRight size={16} /></Button>
+                </>
+              ) : (
+                <>
+                  <p className="text-lg font-semibold text-stone-900">No rooms yet</p>
+                  <p className="text-sm text-stone-600 mt-1 [text-wrap:balance]">Add the rooms that need carpet first, then come back here.</p>
+                  <Button variant="primary" className="mt-5 h-11 px-5" onClick={onGoToRooms}><Plus size={16} /> Add a room</Button>
+                </>
+              )}
             </div>
           </div>
         )}
-        <svg width={widthPx + 90} height={lenPx + 60} className="select-none">
-          <g transform={`translate(${pan.x},${pan.y})`}>
-            {/* carpet body */}
-            <rect x={0} y={0} width={widthPx} height={lenPx} fill="#3a3631" stroke="#55504a" strokeWidth="1" />
-            <rect x={0} y={0} width={widthPx} height={lenPx} fill="url(#weave)" opacity="0.5" />
-            <defs>
-              <pattern id="weave" width="8" height="8" patternUnits="userSpaceOnUse">
-                <path d="M0 0L8 8M8 0L0 8" stroke="#4a453f" strokeWidth="0.6" />
-              </pattern>
-            </defs>
-            {/* grid */}
-            {gridLinesX.map((i) => (
-              <line key={"gx" + i} x1={i * gridSize * pxPerMm} y1={0} x2={i * gridSize * pxPerMm} y2={lenPx} stroke="#4a453f" strokeWidth="0.5" opacity="0.4" />
-            ))}
-            {gridLinesY.map((i) => (
-              <line key={"gy" + i} x1={0} y1={i * gridSize * pxPerMm} x2={widthPx} y2={i * gridSize * pxPerMm} stroke="#4a453f" strokeWidth="0.5" opacity="0.4" />
-            ))}
-            {/* required-length marker */}
-            <line x1={0} y1={reqLength * pxPerMm} x2={widthPx} y2={reqLength * pxPerMm} stroke="#e0a527" strokeWidth="1.5" strokeDasharray="5 3" />
-            {/* top ruler */}
-            {metreTicks.map((m) => (
-              <g key={"tm" + m}>
-                <line x1={m * 1000 * pxPerMm} y1={-8} x2={m * 1000 * pxPerMm} y2={0} stroke="#e0a527" strokeWidth="1.5" />
-                <text x={m * 1000 * pxPerMm + 3} y={-10} fontSize="10" fontFamily="monospace" fill="#e0a527">{m}m</text>
-              </g>
-            ))}
-            {/* left ruler */}
-            {lengthTicks.map((m) => (
-              <g key={"lm" + m}>
-                <line x1={-8} y1={m * 1000 * pxPerMm} x2={0} y2={m * 1000 * pxPerMm} stroke="#7a756c" strokeWidth="1" />
-                <text x={-32} y={m * 1000 * pxPerMm + 3} fontSize="9" fontFamily="monospace" fill="#7a756c">{m}m</text>
-              </g>
-            ))}
 
-            {instances.map((inst) => {
-              const room = roomsById[inst.roomId];
-              if (!room) return null;
-              const verts = instanceVertices(room, inst);
-              const pts = verts.map((v) => `${v.x * pxPerMm},${v.y * pxPerMm}`).join(" ");
-              const isSelected = selectedId === inst.id;
-              const isInvalid = invalidIds.has(inst.id);
-              const bb = boundingBox(verts);
-              const cx = (bb.minX + bb.maxX) / 2 * pxPerMm, cy = (bb.minY + bb.maxY) / 2 * pxPerMm;
-              return (
-                <g key={inst.id} onMouseDown={(e) => beginDrag(e, inst)} style={{ cursor: "grab" }}>
-                  <polygon
-                    points={pts}
-                    fill={isInvalid ? "#c9403066" : room.color + "77"}
-                    stroke={isInvalid ? "#e5493a" : isSelected ? "#e0a527" : room.color}
-                    strokeWidth={isSelected ? 2.5 : isInvalid ? 2 : 1.5}
-                    strokeDasharray={isInvalid ? "7 4" : undefined}
-                  />
-                  {room.grainDirection && (
-                    <line x1={cx} y1={cy + 14} x2={cx} y2={cy - 14} stroke="#f7f5f0" strokeWidth="1.5" markerEnd="url(#arrow)" transform={`rotate(${0} ${cx} ${cy})`} />
-                  )}
-                  <text x={cx} y={cy} fontSize="11" fontFamily="monospace" fill="#f7f5f0" textAnchor="middle" style={{ pointerEvents: "none" }}>{room.name}</text>
-                  {isInvalid && (
-                    <g transform={`translate(${bb.minX * pxPerMm + 4},${bb.minY * pxPerMm + 4})`} style={{ pointerEvents: "none" }}>
-                      <circle r="8" fill="#e5493a" />
-                      <text x="0" y="3" fontSize="10" fontWeight="bold" textAnchor="middle" fill="white">!</text>
-                    </g>
-                  )}
-                </g>
-              );
-            })}
-            <defs>
-              <marker id="arrow" markerWidth="6" markerHeight="6" refX="3" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#f7f5f0" /></marker>
-            </defs>
-          </g>
-        </svg>
+        {/* Selection actions (small screens — larger ones use the side panel) */}
+        {selectedInst && (
+          <div className="lg:hidden absolute top-3 left-1/2 -translate-x-1/2 z-10 flex items-center gap-1 bg-white border border-stone-200 rounded-xl shadow-lg p-1 animate-fade-in max-w-[calc(100%-24px)]">
+            <span className="text-xs font-medium text-stone-700 px-2 truncate max-w-[120px]">{selectedRoomName}</span>
+            <IconButton label="Rotate 90° (R)" onClick={selectionActions.onRotate} disabled={rotationLocked}><RotateCw size={16} /></IconButton>
+            <IconButton label="Duplicate" onClick={selectionActions.onDuplicate}><Copy size={16} /></IconButton>
+            <IconButton label="Remove from carpet" onClick={selectionActions.onDelete} className="text-red-600 hover:bg-red-50 hover:text-red-700"><Trash2 size={16} /></IconButton>
+          </div>
+        )}
+
+        {/* Hints + zoom */}
+        <div className="hidden md:flex absolute bottom-4 left-4 items-center gap-2 text-xs text-stone-600 bg-white/90 backdrop-blur border border-stone-200 rounded-lg px-2.5 py-1.5 shadow-sm pointer-events-none">
+          <MousePointerClick size={14} className="text-brand-600" />
+          <span>Drag a piece to move it · click a piece to turn or remove it</span>
+        </div>
+        <div className="absolute bottom-4 right-4 flex items-center bg-white border border-stone-200 rounded-lg shadow-sm p-0.5">
+          <IconButton label="Zoom out" onClick={() => zoom(0.85)} className="w-8 h-8"><ZoomOut size={15} /></IconButton>
+          <IconButton label="Fit roll to screen" onClick={fitToScreen} className="w-8 h-8"><Maximize2 size={14} /></IconButton>
+          <IconButton label="Zoom in" onClick={() => zoom(1.18)} className="w-8 h-8"><ZoomIn size={15} /></IconButton>
+        </div>
       </div>
     </div>
   );
@@ -2223,45 +2993,137 @@ function CuttingCanvas({ rooms, roomsById, instances, setInstances, rollWidth, t
    SECTION: TOP BAR
    ====================================================================== */
 
-function TopBar({ projectName, setProjectName, stats, onUndo, onRedo, canUndo, canRedo, onAutoArrange, arranging, arrangeNote, onSave, view, setView, onOpenCuttingPlan, instanceCount }) {
-  return (
-    <div className="flex items-center gap-3 px-4 py-2.5 bg-[#242220] text-stone-200 border-b border-black/40 flex-wrap">
-      <ScissorsLineDashed size={16} className="text-[#e0a527]" />
-      <input value={projectName} onChange={(e) => setProjectName(e.target.value)} title="Project name" className="bg-transparent text-sm font-semibold outline-none border-b border-transparent focus:border-stone-500 w-40" />
-      <div className="flex bg-[#1c1a18] rounded-xl p-0.5 text-xs ml-2">
-        <button onClick={() => setView("rooms")} className={`px-3 py-1 rounded-xl ${view === "rooms" ? "bg-[#3c7a6f] text-white" : "text-stone-400"}`}>Rooms</button>
-        <button onClick={() => setView("cutting")} className={`px-3 py-1 rounded-xl flex items-center gap-1.5 ${view === "cutting" ? "bg-[#3c7a6f] text-white" : "text-stone-400"}`}>
-          Cutting Plan
-          {instanceCount > 0 && <span className={`text-[9px] rounded-full px-1.5 ${view === "cutting" ? "bg-white/25" : "bg-white/10"}`}>{instanceCount}</span>}
-        </button>
-      </div>
-      <div className="flex items-center gap-4 ml-4 text-[11px] font-mono text-stone-400">
-        <span>Length <b className="text-[#e0a527]">{stats.length}</b></span>
-        <span>Area <b className="text-stone-200">{stats.area}</b></span>
-        <span>Waste <b className="text-stone-200">{stats.waste}</b></span>
-      </div>
-      <div className="ml-auto flex items-center gap-1.5">
-        <button onClick={onUndo} disabled={!canUndo} title="Undo" className="p-2 hover:bg-white/10 rounded-full disabled:opacity-30 transition-colors"><Undo2 size={15} /></button>
-        <button onClick={onRedo} disabled={!canRedo} title="Redo" className="p-2 hover:bg-white/10 rounded-full disabled:opacity-30 transition-colors"><Redo2 size={15} /></button>
-        <div className="relative">
-          <button onClick={onAutoArrange} disabled={arranging} title="Search for an efficient layout using exact piece geometry — only ever replaces the current plan with a shorter one" className="flex items-center gap-1.5 text-sm font-medium bg-[#c98a3a] text-white px-4 py-2 rounded-xl hover:bg-[#b57a2f] shadow-sm transition-colors disabled:opacity-60"><Grid3x3 size={14} className={arranging ? "animate-spin" : ""} /> {arranging ? "Optimising…" : "Auto Arrange"}</button>
-          {arrangeNote && (
-            <div className="absolute top-full right-0 mt-1.5 text-[11px] text-stone-300 bg-[#1c1a18] border border-white/10 rounded-lg px-2.5 py-1.5 whitespace-nowrap shadow-lg z-10">
-              {arrangeNote}
-            </div>
-          )}
-        </div>
+function SaveStatus({ state }) {
+  if (state === "saving") return <span className="hidden lg:flex items-center gap-1.5 text-xs text-stone-300 px-2"><Loader2 size={13} className="animate-spin" /> Saving…</span>;
+  return <span className="hidden lg:flex items-center gap-1.5 text-xs text-stone-300 px-2" title="Your work is saved on this device automatically"><CheckCircle2 size={14} className="text-emerald-400" /> Saved</span>;
+}
 
-        <button onClick={onOpenCuttingPlan} title="Open a clean, printable cutting plan" className="flex items-center gap-1.5 text-sm font-medium px-4 py-2 rounded-xl hover:bg-white/10 transition-colors"><Layers size={14} /> Cutting Plan</button>
-        <button onClick={onSave} title="Project autosaves — click to save immediately" className="flex items-center gap-1.5 text-sm font-medium px-4 py-2 rounded-xl hover:bg-white/10 transition-colors"><Save size={14} /> Save</button>
+// Dark brand bar, matching the srcarpetsandfloors.co.uk navigation.
+const DARK_ICON_BTN = "text-stone-300 hover:bg-white/10 hover:text-white";
+
+function TopBar({ onUndo, onRedo, canUndo, canRedo, onSave, saveState, view, setView, onOpenCuttingPlan, onOpenHelp, roomCount, instanceCount }) {
+  const tabs = [
+    { key: "rooms", n: 1, label: "Your rooms", short: "Rooms", count: roomCount },
+    { key: "cutting", n: 2, label: "Plan the cut", short: "Plan", count: instanceCount },
+  ];
+  return (
+    <header className="shrink-0 bg-ink-900 text-white">
+      <div className="h-16 flex items-center gap-1.5 sm:gap-4 px-2.5 sm:px-5">
+        <a href="https://srcarpetsandfloors.co.uk/" target="_blank" rel="noreferrer" title="SR Carpets & Floors" className="flex items-center gap-3 shrink-0">
+          <img src="/sr-logo-white.png" alt="SR Carpets & Floors" className="hidden md:block h-9 w-auto" />
+          <img src="/sr-mark-white.png" alt="SR Carpets & Floors" className="md:hidden h-7 w-auto" />
+        </a>
+        <span className="hidden xl:flex items-center gap-3 font-display text-sm font-medium uppercase tracking-[0.22em] text-stone-500">
+          <span className="w-px h-5 bg-white/20" /> Carpet Planner
+        </span>
+
+        <nav className="mx-auto flex items-center gap-0.5 sm:gap-1 bg-white/[0.07] rounded-xl p-1 min-w-0 overflow-hidden" aria-label="Steps">
+          {tabs.map((t, i) => {
+            const active = view === t.key;
+            return (
+              <React.Fragment key={t.key}>
+                {i > 0 && <ChevronRight size={15} className="text-white/25 hidden sm:block" />}
+                <button
+                  type="button" onClick={() => setView(t.key)} aria-current={active ? "page" : undefined} aria-label={t.label} title={t.label}
+                  className={cls("flex items-center gap-1.5 sm:gap-2 h-10 pl-1.5 sm:pl-2 pr-2 sm:pr-4 rounded-lg text-sm font-semibold transition-all", FOCUS_RING,
+                    active ? "bg-white text-ink-900 shadow" : "text-stone-300 hover:text-white hover:bg-white/5")}
+                >
+                  <span className={cls("w-6 h-6 rounded-md grid place-items-center text-xs font-bold", active ? "bg-brand-500 text-white" : "bg-white/10 text-stone-300")}>{t.n}</span>
+                  <span className="hidden sm:inline">{t.label}</span><span className={active ? "sm:hidden" : "hidden"}>{t.short}</span>
+                  {t.count > 0 && <span className={cls("hidden sm:inline text-xs tabular-nums rounded-full px-1.5 min-w-[22px]", active ? "bg-stone-100 text-stone-600" : "bg-white/10 text-stone-300")}>{t.count}</span>}
+                </button>
+              </React.Fragment>
+            );
+          })}
+        </nav>
+
+        <div className="flex items-center gap-0.5 sm:gap-1 shrink-0">
+          <SaveStatus state={saveState} />
+          <IconButton label="Undo — take back the last change" onClick={onUndo} disabled={!canUndo} className={DARK_ICON_BTN + " w-9 sm:w-10 h-10"}><Undo2 size={19} /></IconButton>
+          <IconButton label="Redo" onClick={onRedo} disabled={!canRedo} className={DARK_ICON_BTN + " w-10 h-10 hidden sm:inline-flex"}><Redo2 size={19} /></IconButton>
+          <IconButton label="Save now — your work also saves automatically" onClick={onSave} className={DARK_ICON_BTN + " w-10 h-10 hidden md:inline-flex"}><Save size={19} /></IconButton>
+          <Button variant="ghost" className="h-10 px-2 sm:px-3 !text-stone-200 hover:!bg-white/10 hover:!text-white" onClick={onOpenHelp} title="How to use the planner">
+            <HelpCircle size={18} /> <span className="hidden lg:inline">Help</span>
+          </Button>
+          <Button variant="primary" className="ml-0.5 sm:ml-1 h-10 px-3 sm:px-4" onClick={onOpenCuttingPlan} title="See the finished plan and print or save it">
+            <Printer size={17} /> <span className="hidden sm:inline">Print / save plan</span>
+          </Button>
+        </div>
       </div>
-    </div>
+      {/* thin brand rule */}
+      <div className="h-[3px] bg-brand-500" />
+    </header>
+  );
+}
+
+function ProjectNameField({ projectName, setProjectName }) {
+  return (
+    <label className="group inline-flex items-center gap-2 min-w-0 max-w-full">
+      <span className="sr-only">Project name</span>
+      <input
+        value={projectName} onChange={(e) => setProjectName(e.target.value)}
+        title="Click to rename this project"
+        className="min-w-0 w-64 max-w-full h-9 -ml-2 rounded-lg px-2 text-sm font-semibold text-stone-800 bg-transparent border border-transparent hover:bg-white hover:border-stone-200 focus:bg-white focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20 focus:outline-none transition truncate"
+      />
+      <Pencil size={13} className="-ml-8 text-stone-500 pointer-events-none shrink-0" />
+    </label>
   );
 }
 
 /* ======================================================================
-   SECTION: CUTTING PLAN VIEW
+   SECTION: HELP GUIDE — plain-English walkthrough for first-time users
    ====================================================================== */
+
+function HelpModal({ onClose }) {
+  const steps = [
+    { icon: Plus, title: "Add each room", body: "On “Your rooms”, press Add room. Pick the shape that looks most like the room — a plain rectangle, an L-shape or a T-shape. If none fit, click on the grid to draw the corners yourself." },
+    { icon: Ruler, title: "Type in the measurements", body: "Type the length of each wall — in metres, or switch to “ft & in” to use feet and inches. The numbered picture shows which wall is which. You can leave one width and one length empty and the planner will work them out." },
+    { icon: Layers, title: "Put the rooms on the roll", body: "Go to “Plan the cut” and press Place all rooms. Every room you need appears on the carpet roll." },
+    { icon: Sparkles, title: "Press “Arrange for me”", body: "The planner fits the pieces together to use as little carpet as possible. You can also drag pieces around yourself, and click a piece to turn or remove it." },
+    { icon: Printer, title: "Print or save the plan", body: "Press Print / save plan at the top to download a picture or PDF showing exactly where to cut, and how much carpet to buy." },
+  ];
+  return (
+    <Modal onClose={onClose} className="max-w-2xl" labelledBy="help-title">
+      <div className="flex items-start justify-between gap-4 px-6 pt-6 pb-4 border-b border-stone-100">
+        <div>
+          <p className="font-display text-xs font-semibold uppercase tracking-[0.24em] text-brand-600">SR Carpets &amp; Floors</p>
+          <h2 id="help-title" className="text-xl font-semibold text-stone-900 mt-1">How to use the Carpet Planner</h2>
+          <p className="text-sm text-stone-600 mt-1">Five simple steps — no experience needed.</p>
+        </div>
+        <IconButton label="Close" onClick={onClose}><X size={20} /></IconButton>
+      </div>
+      <div className="flex-1 overflow-y-auto px-6 py-5">
+        <ol className="space-y-4">
+          {steps.map((s, i) => (
+            <li key={s.title} className="flex gap-4">
+              <div className="shrink-0 w-11 h-11 rounded-xl bg-brand-50 text-brand-600 grid place-items-center relative">
+                <s.icon size={20} />
+                <span className="absolute -top-1.5 -left-1.5 w-5 h-5 rounded-full bg-ink-900 text-white text-[11px] font-bold grid place-items-center">{i + 1}</span>
+              </div>
+              <div className="min-w-0">
+                <p className="text-sm font-semibold text-stone-900">{s.title}</p>
+                <p className="text-sm text-stone-600 mt-0.5 leading-relaxed">{s.body}</p>
+              </div>
+            </li>
+          ))}
+        </ol>
+        <div className="mt-6 grid sm:grid-cols-2 gap-3">
+          <div className="rounded-xl bg-stone-50 border border-stone-100 p-4">
+            <p className="text-sm font-semibold text-stone-900 flex items-center gap-2"><Undo2 size={16} className="text-brand-600" /> Made a mistake?</p>
+            <p className="text-sm text-stone-600 mt-1 leading-relaxed">Press the curved arrow at the top to undo your last change.</p>
+          </div>
+          <div className="rounded-xl bg-stone-50 border border-stone-100 p-4">
+            <p className="text-sm font-semibold text-stone-900 flex items-center gap-2"><CheckCircle2 size={16} className="text-brand-600" /> Saved for you</p>
+            <p className="text-sm text-stone-600 mt-1 leading-relaxed">Everything saves automatically on this device, so you can close the page and come back later.</p>
+          </div>
+        </div>
+      </div>
+      <div className="px-6 py-4 border-t border-stone-100 bg-stone-50/60 flex justify-end">
+        <Button variant="primary" onClick={onClose}>Got it</Button>
+      </div>
+    </Modal>
+  );
+}
 
 /* ======================================================================
    SECTION: EXPORT HELPERS (PNG / PDF)
@@ -2296,7 +3158,25 @@ function downloadBlob(blob, filename) {
 // so PDF export (which needs toDataURL for the JPEG) would fail exactly
 // where PNG export (toBlob) might appear to work. Drawing natively avoids
 // that risk entirely, for both export paths.
-function renderPlanCanvas({ instances, roomsById, rollWidth, reqLength, projectName, pxPerMm, headerH, scale }) {
+// SR Carpets & Floors logo for the printed plan. Loaded once from this
+// site (same origin), so drawing it never taints the export canvas.
+const PLAN_LOGO_SRC = "/sr-logo-red.png";
+const PLAN_LOGO_H = 24; // px, in plan units
+const PLAN_HEADER_H = 66; // logo row + title + details line
+let planLogoPromise = null;
+function loadPlanLogo() {
+  if (!planLogoPromise) {
+    planLogoPromise = new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => { planLogoPromise = null; resolve(null); }; // export still works without it
+      img.src = PLAN_LOGO_SRC;
+    });
+  }
+  return planLogoPromise;
+}
+
+function renderPlanCanvas({ instances, roomsById, rollWidth, reqLength, projectName, pxPerMm, headerH, scale, logo, grippers }) {
   const svgW = rollWidth * pxPerMm + 20;
   const svgH = reqLength * pxPerMm + 20 + headerH;
   const canvas = document.createElement("canvas");
@@ -2307,16 +3187,20 @@ function renderPlanCanvas({ instances, roomsById, rollWidth, reqLength, projectN
   ctx.fillStyle = "#ffffff";
   ctx.fillRect(0, 0, svgW, svgH);
 
+  if (logo && logo.naturalHeight) {
+    ctx.drawImage(logo, 10, 8, (logo.naturalWidth / logo.naturalHeight) * PLAN_LOGO_H, PLAN_LOGO_H);
+  }
+
   ctx.textBaseline = "alphabetic";
   ctx.textAlign = "left";
   ctx.fillStyle = "#1c1a18";
   ctx.font = "bold 13px sans-serif";
-  ctx.fillText(`${projectName} — Cutting Plan`, 10, 18);
+  ctx.fillText(`${projectName} — Cutting Plan`, 10, 46);
   ctx.fillStyle = "#78716c";
   ctx.font = "9.5px monospace";
   ctx.fillText(
-    `Roll ${(rollWidth / 1000).toFixed(2)}m wide \u00B7 Required length ${(reqLength / 1000).toFixed(2)}m \u00B7 ${instances.length} piece(s) \u00B7 ${new Date().toLocaleDateString()}`,
-    10, 32
+    `Roll ${(rollWidth / 1000).toFixed(2)}m wide \u00B7 Required length ${(reqLength / 1000).toFixed(2)}m \u00B7 ${instances.length} piece(s) \u00B7 ${grippers} gripper(s) \u00B7 ${new Date().toLocaleDateString()}`,
+    10, 60
   );
 
   const offX = 10, offY = headerH + 10;
@@ -2420,19 +3304,22 @@ function buildSinglePageImagePDF(jpegBytes, imgPxW, imgPxH, pageW, pageH) {
   return out;
 }
 
-function CuttingPlanModal({ onClose, rooms, roomsById, instances, rollWidth, projectName, reqLength }) {
+function CuttingPlanModal({ onClose, roomsById, instances, rollWidth, projectName, reqLength, stats }) {
   const pxPerMm = Math.min(0.5, 780 / rollWidth);
   const svgRef = useRef(null);
   const [exportState, setExportState] = useState("idle"); // idle | working | error
   const [pdfState, setPdfState] = useState("idle"); // idle | working | error
-  const headerH = 40;
+  const headerH = PLAN_HEADER_H;
+  useEffect(() => { loadPlanLogo(); }, []);
   const svgW = rollWidth * pxPerMm + 20;
   const svgH = reqLength * pxPerMm + 20 + headerH;
+  const empty = instances.length === 0;
 
   async function exportAsImage() {
     setExportState("working");
     try {
-      const canvas = renderPlanCanvas({ instances, roomsById, rollWidth, reqLength, projectName, pxPerMm, headerH, scale: 2 });
+      const logo = await loadPlanLogo();
+      const canvas = renderPlanCanvas({ instances, roomsById, rollWidth, reqLength, projectName, pxPerMm, headerH, scale: 2, logo, grippers: stats.grippers });
       canvas.toBlob((blob) => {
         if (!blob) { setExportState("error"); return; }
         downloadBlob(blob, `${safeFileName(projectName)}.png`);
@@ -2447,7 +3334,8 @@ function CuttingPlanModal({ onClose, rooms, roomsById, instances, rollWidth, pro
     setPdfState("working");
     try {
       const scale = 2;
-      const canvas = renderPlanCanvas({ instances, roomsById, rollWidth, reqLength, projectName, pxPerMm, headerH, scale });
+      const logo = await loadPlanLogo();
+      const canvas = renderPlanCanvas({ instances, roomsById, rollWidth, reqLength, projectName, pxPerMm, headerH, scale, logo, grippers: stats.grippers });
       const jpegDataUrl = canvas.toDataURL("image/jpeg", 0.92);
       const jpegBytes = base64ToUint8Array(jpegDataUrl.split(",")[1]);
       const pdfBytes = buildSinglePageImagePDF(jpegBytes, canvas.width, canvas.height, svgW, svgH);
@@ -2458,106 +3346,120 @@ function CuttingPlanModal({ onClose, rooms, roomsById, instances, rollWidth, pro
     }
   }
 
+  const rows = Object.entries(
+    instances.reduce((acc, inst) => {
+      if (!roomsById[inst.roomId]) return acc;
+      acc[inst.roomId] = (acc[inst.roomId] || 0) + 1;
+      return acc;
+    }, {})
+  );
+
   return (
-    <div
-      className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4"
-      style={{ position: "fixed", inset: 0 }}
-      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
-    >
-      <div
-        className="bg-white rounded-xl w-full max-w-4xl shadow-2xl"
-        style={{ display: "flex", flexDirection: "column", maxHeight: "88vh", height: "88vh" }}
-      >
-        <div className="flex items-center justify-between px-5 py-3 border-b border-stone-200" style={{ flex: "0 0 auto" }}>
-          <h2 className="font-semibold text-sm">{projectName} — Cutting Plan</h2>
-          <div className="flex items-center gap-3">
-            <button
-              onClick={exportAsPDF}
-              disabled={pdfState === "working"}
-              title="Download this cutting plan as a PDF"
-              className="flex items-center gap-1.5 text-sm font-medium text-[#3c7a6f] px-4 py-2 rounded-xl bg-[#3c7a6f]/10 hover:bg-[#3c7a6f]/20 disabled:opacity-50 transition-colors"
-            >
-              <FileText size={14} /> {pdfState === "working" ? "Preparing…" : "Save as PDF"}
-            </button>
-            <button
-              onClick={exportAsImage}
-              disabled={exportState === "working"}
-              title="Download this cutting plan as a PNG image"
-              className="flex items-center gap-1.5 text-sm font-medium bg-[#3c7a6f] text-white px-4 py-2 rounded-xl hover:bg-[#336a60] shadow-sm disabled:opacity-50 transition-colors"
-            >
-              <Download size={14} /> {exportState === "working" ? "Preparing…" : "Save as Image"}
-            </button>
-            <button onClick={onClose} title="Close" className="text-stone-500 hover:text-stone-800 hover:bg-stone-100 rounded-full p-1.5 transition-colors"><X size={18} /></button>
-          </div>
+    <Modal onClose={onClose} className="max-w-5xl h-[94vh]" labelledBy="plan-title">
+      <div className="flex flex-wrap items-center gap-3 px-5 sm:px-6 py-4 border-b border-stone-100 shrink-0">
+        <div className="min-w-0 mr-auto">
+          <h2 id="plan-title" className="text-lg font-semibold text-stone-900 truncate">Cutting plan</h2>
+          <p className="text-xs text-stone-600 truncate">{projectName}</p>
         </div>
-        <div className="p-5" style={{ flex: "1 1 auto", minHeight: 0, overflowY: "scroll", overflowX: "auto" }}>
-          {pdfState === "error" && (
-            <div className="mb-3 text-xs text-red-600 flex items-center gap-1 bg-red-50 border border-red-200 rounded-xl px-2 py-1.5">
-              <AlertTriangle size={13} /> Couldn't generate the PDF in this browser. Try "Save as Image" instead, or print this view and choose "Save as PDF" in your browser's print dialog.
-            </div>
-          )}
-          {exportState === "error" && (
-            <div className="mb-3 text-xs text-red-600 flex items-center gap-1 bg-red-50 border border-red-200 rounded-xl px-2 py-1.5">
-              <AlertTriangle size={13} /> Couldn't generate the image in this browser. Try a right-click → "Save image as" on the plan below instead.
-            </div>
-          )}
-          <div className="flex gap-6 text-xs font-mono text-stone-600 mb-4">
-            <span>Roll width: {(rollWidth / 1000).toFixed(2)}m</span>
-            <span>Required length: {(reqLength / 1000).toFixed(2)}m</span>
-            <span>Pieces: {instances.length}</span>
-          </div>
-          <svg ref={svgRef} width={svgW} height={svgH} viewBox={`0 0 ${svgW} ${svgH}`} style={{ maxWidth: "100%", height: "auto" }} className="border border-stone-300 block">            <rect width={svgW} height={svgH} fill="#ffffff" />
-            <text x={10} y={18} fontSize="13" fontWeight="bold" fontFamily="ui-sans-serif, system-ui, sans-serif" fill="#1c1a18">{projectName} — Cutting Plan</text>
-            <text x={10} y={32} fontSize="9.5" fontFamily="monospace" fill="#78716c">
-              {`Roll ${(rollWidth / 1000).toFixed(2)}m wide · Required length ${(reqLength / 1000).toFixed(2)}m · ${instances.length} piece(s) · ${new Date().toLocaleDateString()}`}
-            </text>
-            <g transform={`translate(10,${headerH + 10})`}>
-              <rect x={0} y={0} width={rollWidth * pxPerMm} height={reqLength * pxPerMm} fill="#fafaf7" stroke="#333" />
-              {instances.map((inst) => {
-                const room = roomsById[inst.roomId];
-                if (!room) return null;
-                const verts = instanceVertices(room, inst);
-                const pts = verts.map((v) => `${v.x * pxPerMm},${v.y * pxPerMm}`).join(" ");
-                const bb = boundingBox(verts);
-                const midX = ((bb.minX + bb.maxX) / 2) * pxPerMm, midY = ((bb.minY + bb.maxY) / 2) * pxPerMm;
-                return (
-                  <g key={inst.id}>
-                    <polygon points={pts} fill={room.color + "33"} stroke={room.color} strokeWidth="1.5" />
-                    <text x={midX} y={midY - 4} fontSize="9" fontWeight="bold" textAnchor="middle" fontFamily="monospace" fill="#1c1a18">{room.name}</text>
-                    <text x={midX} y={midY + 8} fontSize="8" textAnchor="middle" fontFamily="monospace" fill="#555048">
-                      {formatLength(bb.maxX - bb.minX, "m")} × {formatLength(bb.maxY - bb.minY, "m")}
-                    </text>
-                  </g>
-                );
-              })}
-            </g>
-          </svg>
-          <table className="w-full text-xs font-mono mt-5 border-t border-stone-200">
-            <thead><tr className="text-stone-400 text-left"><th className="py-1.5">Room</th><th>Size</th><th>Area</th><th>Qty on carpet</th></tr></thead>
-            <tbody>
-              {Object.entries(
-                instances.reduce((acc, inst) => {
-                  if (!roomsById[inst.roomId]) return acc;
-                  acc[inst.roomId] = (acc[inst.roomId] || 0) + 1;
-                  return acc;
-                }, {})
-              ).map(([roomId, count]) => {
-                const room = roomsById[roomId];
-                return (
-                  <tr key={roomId} className="border-t border-stone-100">
-                    <td className="py-1.5">{room.name}</td>
-                    <td>{formatLength(room.width, "m")} × {formatLength(room.length, "m")}</td>
-                    <td>{formatArea(room.area)}</td>
-                    <td>× {count}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-          <p className="text-[11px] text-stone-400 mt-4 flex items-center gap-1"><Info size={12} /> Both exports are rendered client-side at 2x resolution for a crisp, printable result.</p>
-        </div>
+        <Button variant="secondary" onClick={exportAsPDF} disabled={empty || pdfState === "working"} title="Download this cutting plan as a PDF">
+          {pdfState === "working" ? <Loader2 size={15} className="animate-spin" /> : <FileText size={15} />} {pdfState === "working" ? "Preparing…" : "Download PDF"}
+        </Button>
+        <Button variant="primary" onClick={exportAsImage} disabled={empty || exportState === "working"} title="Download this cutting plan as a PNG image">
+          {exportState === "working" ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />} {exportState === "working" ? "Preparing…" : "Download image"}
+        </Button>
+        <IconButton label="Close (Esc)" onClick={onClose}><X size={18} /></IconButton>
       </div>
-    </div>
+
+      <div className="flex-1 min-h-0 overflow-auto bg-stone-50 px-5 sm:px-6 py-5">
+        {pdfState === "error" && (
+          <div className="mb-4"><Notice tone="error">Couldn't create the PDF in this browser. Try “Download image” instead, or print this page and choose “Save as PDF”.</Notice></div>
+        )}
+        {exportState === "error" && (
+          <div className="mb-4"><Notice tone="error">Couldn't create the image in this browser. Try right-clicking the plan below and choosing “Save image as”.</Notice></div>
+        )}
+
+        {empty ? (
+          <div className="h-full grid place-items-center text-center">
+            <div>
+              <div className="w-12 h-12 mx-auto rounded-xl bg-white border border-stone-200 text-stone-500 grid place-items-center mb-3"><Layers size={22} /></div>
+              <p className="text-sm font-semibold text-stone-900">Nothing on the carpet yet</p>
+              <p className="text-xs text-stone-600 mt-1">Place some rooms in the cutting layout and your plan will appear here.</p>
+            </div>
+          </div>
+        ) : (
+          <>
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5 mb-5">
+              <StatTile label="Roll width" value={`${(rollWidth / 1000).toFixed(2)}m`} />
+              <StatTile label="Length to buy" value={`${(reqLength / 1000).toFixed(2)}m`} tone="accent" />
+              <StatTile label="Pieces" value={instances.length} />
+              <StatTile label="Waste" value={stats.wastePctLabel} sub={stats.wasteLabel} />
+              <StatTile label="Grippers" value={stats.grippers} sub={stats.gripperSub} />
+            </div>
+            <div className="grid xl:grid-cols-[minmax(0,1fr)_300px] gap-5 items-start">
+              <div className="bg-white border border-stone-200 rounded-xl p-3 overflow-auto shadow-sm">
+                <svg ref={svgRef} width={svgW} height={svgH} viewBox={`0 0 ${svgW} ${svgH}`} style={{ maxWidth: "100%", height: "auto" }} className="block mx-auto">
+                  <rect width={svgW} height={svgH} fill="#ffffff" />
+                  <image href={PLAN_LOGO_SRC} x={10} y={8} height={PLAN_LOGO_H} preserveAspectRatio="xMinYMid meet" width={Math.max(0, svgW - 20)} />
+                  <text x={10} y={46} fontSize="13" fontWeight="bold" fontFamily="Inter, ui-sans-serif, system-ui, sans-serif" fill="#1c1a18">{projectName} — Cutting Plan</text>
+                  <text x={10} y={60} fontSize="9.5" fontFamily="ui-monospace, monospace" fill="#78716c">
+                    {`Roll ${(rollWidth / 1000).toFixed(2)}m wide · Required length ${(reqLength / 1000).toFixed(2)}m · ${instances.length} piece(s) · ${stats.grippers} gripper(s) · ${new Date().toLocaleDateString()}`}
+                  </text>
+                  <g transform={`translate(10,${headerH + 10})`}>
+                    <rect x={0} y={0} width={rollWidth * pxPerMm} height={reqLength * pxPerMm} fill="#fafaf7" stroke="#333" />
+                    {instances.map((inst) => {
+                      const room = roomsById[inst.roomId];
+                      if (!room) return null;
+                      const verts = instanceVertices(room, inst);
+                      const pts = verts.map((v) => `${v.x * pxPerMm},${v.y * pxPerMm}`).join(" ");
+                      const bb = boundingBox(verts);
+                      const midX = ((bb.minX + bb.maxX) / 2) * pxPerMm, midY = ((bb.minY + bb.maxY) / 2) * pxPerMm;
+                      return (
+                        <g key={inst.id}>
+                          <polygon points={pts} fill={room.color + "33"} stroke={room.color} strokeWidth="1.5" />
+                          <text x={midX} y={midY - 4} fontSize="9" fontWeight="bold" textAnchor="middle" fontFamily="ui-monospace, monospace" fill="#1c1a18">{room.name}</text>
+                          <text x={midX} y={midY + 8} fontSize="8" textAnchor="middle" fontFamily="ui-monospace, monospace" fill="#555048">
+                            {formatLength(bb.maxX - bb.minX, "m")} × {formatLength(bb.maxY - bb.minY, "m")}
+                          </text>
+                        </g>
+                      );
+                    })}
+                  </g>
+                </svg>
+              </div>
+
+              <div className="bg-white border border-stone-200 rounded-xl shadow-sm overflow-hidden">
+                <p className="text-sm font-semibold text-stone-900 px-4 pt-4 pb-2">Pieces to cut</p>
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="text-stone-600 text-left border-b border-stone-100">
+                      <th className="font-medium px-4 py-2">Room</th><th className="font-medium py-2">Size</th><th className="font-medium py-2 pr-4 text-right">Qty</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map(([roomId, count]) => {
+                      const room = roomsById[roomId];
+                      return (
+                        <tr key={roomId} className="border-b border-stone-50 last:border-0">
+                          <td className="px-4 py-2.5">
+                            <span className="flex items-center gap-2 min-w-0"><span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: room.color }} /><span className="truncate text-stone-900 font-medium">{room.name}</span></span>
+                          </td>
+                          <td className="py-2.5 tabular-nums text-stone-600">
+                            {formatLength(room.width, "m")} × {formatLength(room.length, "m")}
+                            <span className="block text-stone-500">{formatArea(room.area)}</span>
+                          </td>
+                          <td className="py-2.5 pr-4 text-right tabular-nums font-medium text-stone-900">× {count}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            <p className="text-xs text-stone-500 mt-4 flex items-center gap-1.5"><Info size={12} /> Downloads are rendered in your browser at 2× resolution, so they print sharply.</p>
+          </>
+        )}
+      </div>
+    </Modal>
   );
 }
 
@@ -2570,6 +3472,7 @@ export default function App() {
   const [instances, setInstances] = useState([]);
   const [rollWidth, setRollWidth] = useState(4000);
   const [unit, setUnit] = useState("m");
+  const [inputUnit, setInputUnit] = useState(null); // unit last used to type room sizes (may be "ft")
   const [tolerance, setTolerance] = useState(0);
   const [grainMode, setGrainMode] = useState("90");
   const [gridSize, setGridSize] = useState(25);
@@ -2577,18 +3480,22 @@ export default function App() {
   const [allowOverlap, setAllowOverlap] = useState(true);
   const [guillotineMode, setGuillotineMode] = useState(false);
   const [arranging, setArranging] = useState(false);
-  const [arrangeNote, setArrangeNote] = useState(null);
   const [projectName, setProjectName] = useState("Untitled Project");
   const [view, setView] = useState("rooms");
   const [selectedId, setSelectedId] = useState(null);
   const [modal, setModal] = useState(null); // { mode: 'add'|'edit', room? }
   const [showCuttingPlan, setShowCuttingPlan] = useState(false);
+  const [showHelp, setShowHelp] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  const [toast, setToast] = useState(null);
+  const [saveState, setSaveState] = useState("saved"); // saved | saving
 
   const historyRef = useRef({ stack: [], index: -1 });
-  const [historyTick, setHistoryTick] = useState(0);
+  const [historyTick, setHistoryTick] = useState(0); // eslint-disable-line no-unused-vars
 
   const roomsById = useMemo(() => Object.fromEntries(rooms.map((r) => [r.id, r])), [rooms]);
+
+  function showToast(message, tone = "info") { setToast({ message, tone, id: Date.now() }); }
 
   function commitHistory(nextInstances) {
     const h = historyRef.current;
@@ -2628,7 +3535,9 @@ export default function App() {
         setAllowOverlap(data.allowOverlap ?? true);
         setGuillotineMode(data.guillotineMode ?? false);
         setProjectName(data.projectName || "Untitled Project");
+        setInputUnit(data.inputUnit || null);
         historyRef.current = { stack: [data.instances || []], index: 0 };
+        if ((data.instances || []).length > 0) setView("cutting");
       } else {
         historyRef.current = { stack: [[]], index: 0 };
       }
@@ -2636,21 +3545,53 @@ export default function App() {
     })();
   }, []);
 
-  function doSave() {
-    saveProject({ rooms, instances, rollWidth, unit, tolerance, grainMode, gridSize, snapEnabled, allowOverlap, guillotineMode, projectName });
+  async function doSave() {
+    setSaveState("saving");
+    await saveProject({ rooms, instances, rollWidth, unit, inputUnit, tolerance, grainMode, gridSize, snapEnabled, allowOverlap, guillotineMode, projectName });
+    setSaveState("saved");
   }
   useEffect(() => {
     if (!loaded) return;
+    setSaveState("saving");
     const t = setTimeout(doSave, 700);
     return () => clearTimeout(t);
-  }, [rooms, instances, rollWidth, unit, tolerance, grainMode, gridSize, snapEnabled, allowOverlap, guillotineMode, projectName, loaded]); // eslint-disable-line
+  }, [rooms, instances, rollWidth, unit, inputUnit, tolerance, grainMode, gridSize, snapEnabled, allowOverlap, guillotineMode, projectName, loaded]); // eslint-disable-line
 
-  function handleSaveRoom(roomData) {
+  function handleManualSave() {
+    doSave();
+    showToast("Project saved", "success");
+  }
+
+  // Rooms go straight onto the roll: a room always has as many pieces on the
+  // roll as its "How many" says. Missing pieces are added in clear space
+  // below the layout (always valid); extra ones (newest first) are removed.
+  function syncRoomPieces(room, roomsByIdNext) {
+    const mine = instances.filter((i) => i.roomId === room.id);
+    const want = Math.max(1, room.quantity || 1);
+    let next = instances;
+    if (mine.length > want) {
+      const drop = new Set(mine.slice(want).map((i) => i.id));
+      next = instances.filter((i) => !drop.has(i.id));
+    } else if (mine.length < want) {
+      next = [...instances];
+      for (let k = mine.length; k < want; k++) {
+        const y = requiredLength(next, roomsByIdNext) + (next.length ? tolerance + 60 : 0);
+        next.push(newInstanceFor(room, 0, y));
+      }
+    }
+    if (next !== instances) { setInstances(next); commitHistory(next); }
+  }
+
+  function handleSaveRoom(roomData, usedUnit) {
+    if (usedUnit) setInputUnit(usedUnit);
+    const isNew = !rooms.some((r) => r.id === roomData.id);
     setRooms((prev) => {
       const exists = prev.some((r) => r.id === roomData.id);
       return exists ? prev.map((r) => (r.id === roomData.id ? roomData : r)) : [...prev, roomData];
     });
+    syncRoomPieces(roomData, { ...roomsById, [roomData.id]: roomData });
     setModal(null);
+    showToast(isNew ? `“${roomData.name}” added to the roll` : `“${roomData.name}” updated`, "success");
   }
 
   function handleDeleteRoom(id) {
@@ -2665,21 +3606,54 @@ export default function App() {
   function handleDuplicateRoom(room) {
     const copy = { ...room, id: `room_${Date.now()}`, name: room.name + " copy" };
     setRooms((prev) => [...prev, copy]);
+    syncRoomPieces(copy, { ...roomsById, [copy.id]: copy });
   }
 
   function handleQuantityChange(id, qty) {
-    setRooms((prev) => prev.map((r) => (r.id === id ? { ...r, quantity: qty } : r)));
+    const room = roomsById[id];
+    if (!room) return;
+    const updated = { ...room, quantity: qty };
+    setRooms((prev) => prev.map((r) => (r.id === id ? updated : r)));
+    syncRoomPieces(updated, { ...roomsById, [id]: updated });
   }
 
   // Plan an oversize room with a join: it's replaced by narrower pieces
   // (library and canvas), then Auto Arrange runs. The original is kept on
   // each part as `joinOf` so the join can be undone.
   const [pendingArrange, setPendingArrange] = useState(false);
+  // Where the join goes matters: each candidate split is test-packed with
+  // everything else on the roll (a quick, reduced-budget search) and the one
+  // needing the least carpet wins; fewer joins breaks a tie. The full Auto
+  // Arrange then runs on the chosen split.
+  const JOIN_TRIAL_BUDGET = 0.15; // ponytail: quick SA pass per candidate, so a close call between two splits can flip run to run
   function handlePlanWithJoin(roomId) {
     const room = roomsById[roomId];
     if (!room) return;
-    const parts = splitRoomForJoin(room, rollWidth, tolerance, grainMode);
-    if (parts.length < 2) { setArrangeNote("Couldn't split this room into narrower pieces"); return; }
+    setArranging(true);
+    setTimeout(() => {
+      const candidates = joinSplitCandidates(room, rollWidth, tolerance, grainMode);
+      if (!candidates.length) { setArranging(false); showToast("Couldn't split this room into narrower pieces", "warn"); return; }
+      const others = instances.filter((i) => i.roomId !== roomId);
+      const copies = Math.max(1, instances.filter((i) => i.roomId === roomId).length);
+      let best = null;
+      candidates.forEach((parts) => {
+        const trialRooms = { ...roomsById };
+        const trial = [...others];
+        parts.forEach((verts, idx) => {
+          const id = `__join_trial_${idx}`;
+          trialRooms[id] = { ...room, id, vertices: verts };
+          for (let c = 0; c < copies; c++) trial.push({ id: `${id}_${c}`, roomId: id, rotation: 0, x: 0, y: 0, allowanceOverride: null });
+        });
+        const packable = trial.filter((i) => !isOversizeRoom(trialRooms[i.roomId], rollWidth, tolerance, grainMode));
+        const len = requiredLength(autoArrangeOnce(packable, trialRooms, rollWidth, tolerance, grainMode, guillotineMode, JOIN_TRIAL_BUDGET, false), trialRooms);
+        if (!best || len < best.len - EPS || (Math.abs(len - best.len) <= EPS && parts.length < best.parts.length)) best = { parts, len };
+      });
+      applyJoin(room, best.parts);
+    }, 10);
+  }
+
+  function applyJoin(room, parts) {
+    const roomId = room.id;
     const stamp = Date.now();
     const partRooms = parts.map((verts, idx) => {
       const bb = boundingBox(verts);
@@ -2771,19 +3745,23 @@ export default function App() {
     });
   }
 
+  function newInstanceFor(room, x, y) {
+    return {
+      id: `inst_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      roomId: room.id, rotation: 0, x, y,
+      allowanceOverride: room.cuttingAllowance != null ? String(room.cuttingAllowance) : null,
+    };
+  }
+
   // One-click, always-valid placement: drops the room just below whatever is
-  // already on the carpet, so it can never collide or overhang the roll width.
+  // already on the carpet, so it can never collide with another piece.
   function placeRoomOnCarpet(room) {
     setInstances((prev) => {
       const bb = boundingBox(room.vertices);
       const w = bb.maxX - bb.minX;
       const y = requiredLength(prev, roomsById) + (prev.length ? tolerance + 60 : 0);
       const x = Math.max(0, Math.min(rollWidth - w, 0));
-      const newInst = {
-        id: `inst_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-        roomId: room.id, rotation: 0, x, y,
-        allowanceOverride: room.cuttingAllowance != null ? String(room.cuttingAllowance) : null,
-      };
+      const newInst = newInstanceFor(room, x, y);
       const next = [...prev, newInst];
       commitHistory(next);
       setSelectedId(newInst.id);
@@ -2792,26 +3770,53 @@ export default function App() {
     setView("cutting");
   }
 
-  // Keyboard shortcuts on the cutting canvas: Delete/Backspace removes the
-  // selected piece, R rotates it, Escape deselects. Ignored while typing.
+  // Places every copy still needed (quantity minus what's already on the
+  // carpet) for every room, stacked in clear space below the current layout.
+  // stayHere === true keeps the current page (used by "Put back" on the rooms page);
+  // buttons that pass a click event still open the plan.
+  function placeAllRemaining(stayHere) {
+    let next = [...instances];
+    let added = 0;
+    rooms.forEach((room) => {
+      const placed = next.filter((i) => i.roomId === room.id).length;
+      for (let k = placed; k < (room.quantity || 1); k++) {
+        const y = requiredLength(next, roomsById) + (next.length ? tolerance + 60 : 0);
+        next.push(newInstanceFor(room, 0, y));
+        added++;
+      }
+    });
+    if (stayHere !== true) setView("cutting");
+    if (!added) { showToast("Every room is already on the carpet"); return; }
+    setInstances(next);
+    commitHistory(next);
+    setSelectedId(null);
+    showToast(`Placed ${added} piece${added > 1 ? "s" : ""} — press “Arrange for me” to pack them tightly`, "success");
+  }
+
+  // Keyboard shortcuts: Delete/Backspace removes the selected piece, R
+  // rotates it, Escape deselects, Ctrl/Cmd+Z / Ctrl+Y undo and redo.
+  // Ignored while typing or while a dialog is open.
   useEffect(() => {
     function onKey(e) {
       const tag = (e.target.tagName || "").toLowerCase();
-      if (tag === "input" || tag === "textarea" || tag === "select" || modal) return;
-      if (view !== "cutting") return;
+      if (tag === "input" || tag === "textarea" || tag === "select" || modal || showCuttingPlan || showHelp) return;
+      const mod = e.ctrlKey || e.metaKey;
+      if (mod && e.key.toLowerCase() === "z") { e.preventDefault(); if (e.shiftKey) redo(); else undo(); return; }
+      if (mod && e.key.toLowerCase() === "y") { e.preventDefault(); redo(); return; }
+      if (view !== "cutting" || mod) return;
       if ((e.key === "Delete" || e.key === "Backspace") && selectedId) { e.preventDefault(); deleteSelected(); }
       else if (e.key.toLowerCase() === "r" && selectedId) { rotateSelected(); }
       else if (e.key === "Escape") { setSelectedId(null); }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [selectedId, view, modal, grainMode]); // eslint-disable-line
+  }, [selectedId, view, modal, showCuttingPlan, showHelp, grainMode]); // eslint-disable-line
 
   useEffect(() => {
-    if (!arrangeNote) return;
-    const t = setTimeout(() => setArrangeNote(null), 4000);
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 4500);
     return () => clearTimeout(t);
-  }, [arrangeNote]);
+  }, [toast]);
 
   // Always read the settings as they are when the timer fires, never a
   // stale render's closure.
@@ -2822,8 +3827,8 @@ export default function App() {
 
   function runAutoArrange() {
     setArranging(true);
-    setArrangeNote(null);
-    // Defer to the next tick so the "Optimising…" label actually paints
+    setToast(null);
+    // Defer to the next tick so the "Working it out…" state actually paints
     // before the (synchronous, time-budgeted) search runs.
     setTimeout(() => {
       setInstances((prev) => {
@@ -2835,10 +3840,12 @@ export default function App() {
         const isBig = (i) => isOversizeRoom(roomsById[i.roomId], rollWidth, tolerance, grainMode);
         const oversize = prev.filter(isBig);
         const fitPrev = prev.filter((i) => !isBig(i));
-        const finish = (fitted, note) => {
+        const finish = (fitted, note, tone = "success") => {
           const result = oversize.length ? [...fitted, ...placeOversizeBelow(fitted, oversize, roomsById, grainMode)] : fitted;
-          const warn = oversize.length ? `${oversize.length} piece${oversize.length > 1 ? "s" : ""} wider than the roll — flagged; use "Plan with a join"` : null;
-          setArrangeNote([note, warn].filter(Boolean).join(" · ") || null);
+          if (oversize.length) {
+            const warn = `${oversize.length} piece${oversize.length > 1 ? "s are" : " is"} wider than the roll — use “Plan with a join”`;
+            showToast([note, warn].filter(Boolean).join(". "), "warn");
+          } else if (note) showToast(note, tone);
           return result;
         };
         if (fitPrev.length === 0) {
@@ -2849,13 +3856,12 @@ export default function App() {
         }
         const currentLen = requiredLength(fitPrev, roomsById);
         // A room's wall dimensions can be edited after instances of it are
-        // already placed — the instances keep their old x/y, so they can
-        // now overlap a neighbour or stick outside the roll that used to
-        // fit fine. requiredLength can't see this, so validity is checked
-        // FIRST, before any length comparison.
+        // already placed, so they can now overlap or overhang. requiredLength
+        // can't see this, so validity is checked FIRST, before any length
+        // comparison — a short layout that can't actually be cut isn't efficient.
         const currentInvalid = layoutHasCollisions(fitPrev, roomsById, rollWidth, tolerance);
         // Settings may have changed since the plan was made: a rotation the
-        // current setting no longer permits, or guillotine mode switched on
+        // current setting no longer permits, or straight-cuts mode switched on
         // for a plan that wasn't built that way, makes the plan
         // non-compliant — so it must be replaced even if it measures shorter.
         const breaksRotation = grainMode === "locked"
@@ -2867,15 +3873,14 @@ export default function App() {
         const next = autoArrange(fitPrev, roomsById, rollWidth, tolerance, grainMode, guillotineMode);
         const nextLen = requiredLength(next, roomsById);
         lastArrangedGuillotine.current = guillotineMode;
-        // Auto Arrange must never make the current plan worse: whatever's
-        // on the carpet (including manual work) is only replaced by
-        // something strictly shorter, or equal length but easier to cut.
+        // Never make the current plan worse: it's only replaced by a layout
+        // that needs strictly less roll, or the same roll but easier to cut.
         let chosen = null, note = null;
         if (breaksRotation || breaksGuillotine) { chosen = next; note = "Plan rebuilt to match your current settings"; }
-        else if (currentInvalid) { chosen = next; note = nextLen < currentLen - EPS ? "Fixed overlapping pieces and shortened the plan" : "Fixed overlapping pieces"; }
-        else if (nextLen < currentLen - EPS) { chosen = next; }
+        else if (currentInvalid) { chosen = next; note = nextLen < currentLen - EPS ? `Fixed overlapping pieces and shortened the plan to ${(nextLen / 1000).toFixed(2)}m` : "Fixed overlapping pieces"; }
+        else if (nextLen < currentLen - EPS) { chosen = next; note = `Saved ${((currentLen - nextLen) / 1000).toFixed(2)}m — you now need ${(nextLen / 1000).toFixed(2)}m`; }
         else if (Math.abs(nextLen - currentLen) <= EPS && cuttabilityScore(next, roomsById, rollWidth) > cuttabilityScore(fitPrev, roomsById, rollWidth) + EPS) {
-          chosen = next; note = "Same length, easier to cut — plan updated";
+          chosen = next; note = "Same length, but easier to cut — plan updated";
         }
         if (chosen) {
           const result = finish(chosen, note);
@@ -2883,7 +3888,7 @@ export default function App() {
           return result;
         }
         if (oversize.length === 0) {
-          setArrangeNote("Already the shortest (and easiest-to-cut) layout found — current plan kept");
+          showToast("This is already the shortest, easiest-to-cut layout found — your plan was kept");
           return prev;
         }
         const result = finish(fitPrev, "Already the shortest layout found");
@@ -2900,75 +3905,119 @@ export default function App() {
   const waste = Math.max(0, rollArea - roomArea);
   const wastePct = rollArea > 0 ? ((waste / rollArea) * 100).toFixed(1) : "0.0";
 
+  const placedByRoom = useMemo(() => {
+    const m = {};
+    instances.forEach((i) => { if (roomsById[i.roomId]) m[i.roomId] = (m[i.roomId] || 0) + 1; });
+    return m;
+  }, [instances, roomsById]);
+  const totals = useMemo(() => {
+    let needed = 0, placed = 0, remaining = 0;
+    rooms.forEach((r) => {
+      const p = placedByRoom[r.id] || 0;
+      needed += r.quantity || 1; placed += p; remaining += Math.max(0, (r.quantity || 1) - p);
+    });
+    return { needed, placed, remaining };
+  }, [rooms, placedByRoom]);
+
+  const gripper = useMemo(() => gripperCount(rooms), [rooms]);
   const stats = {
-    length: reqLength > 0 ? (reqLength / 1000).toFixed(2) + "m" : "-",
-    area: rollArea > 0 ? formatArea(rollArea) : "-",
-    waste: rollArea > 0 ? `${formatArea(waste)} (${wastePct}%)` : "-",
+    projectName, setProjectName,
+    grippers: gripper.grippers,
+    gripperSub: [gripper.perimeterMm > 0 && `${(gripper.perimeterMm / 1000).toFixed(2)}m edges`, gripper.steps > 0 && `${gripper.steps} step${gripper.steps === 1 ? "" : "s"}`].filter(Boolean).join(" + ") || "No rooms yet",
+    rollWidth,
+    placed: totals.placed,
+    needed: totals.needed,
+    lengthLabel: reqLength > 0 ? (reqLength / 1000).toFixed(2) + "m" : "–",
+    areaLabel: rollArea > 0 ? formatArea(rollArea) : "–",
+    usedLabel: roomArea > 0 ? formatArea(roomArea) : "–",
+    wasteLabel: rollArea > 0 ? formatArea(waste) : "–",
+    wastePctLabel: rollArea > 0 ? `${wastePct}%` : "–",
+  };
+
+  const settings = {
+    rollWidth, setRollWidth, unit, setUnit, tolerance, setTolerance, grainMode, setGrainMode,
+    gridSize, setGridSize, snapEnabled, setSnapEnabled, allowOverlap, setAllowOverlap, guillotineMode, setGuillotineMode,
   };
 
   const selectedInstance = instances.find((i) => i.id === selectedId) || null;
   const selectedRoom = selectedInstance ? roomsById[selectedInstance.roomId] : null;
+  // Called from buttons (which pass a click event) and from shape shortcuts (which pass a template).
+  const openAddRoom = (template) => setModal({ mode: "add", template: template && template.points ? template : null });
+  const openEditRoom = (r) => setModal({ mode: "edit", room: r });
 
-  if (!loaded) return <div className="h-screen flex items-center justify-center bg-[#2b2926] text-stone-400 text-sm font-mono">Loading project…</div>;
+  if (!loaded) {
+    return (
+      <div className="h-screen flex items-center justify-center gap-2 bg-stone-50 text-stone-600 text-sm">
+        <Loader2 size={16} className="animate-spin text-brand-500" /> Loading your project…
+      </div>
+    );
+  }
 
   return (
-    <div className="h-screen flex flex-col font-sans" style={{ fontFamily: "Inter, ui-sans-serif, system-ui" }}>
+    <div className="h-screen supports-[height:100dvh]:h-[100dvh] flex flex-col bg-stone-50 text-stone-800">
       <TopBar
-        projectName={projectName} setProjectName={setProjectName} stats={stats}
+        onOpenHelp={() => setShowHelp(true)}
         onUndo={undo} onRedo={redo} canUndo={historyRef.current.index > 0} canRedo={historyRef.current.index < historyRef.current.stack.length - 1}
-        onAutoArrange={runAutoArrange} arranging={arranging} arrangeNote={arrangeNote} onSave={doSave} view={view} setView={setView} onOpenCuttingPlan={() => setShowCuttingPlan(true)}
-        instanceCount={instances.length}
+        onSave={handleManualSave} saveState={saveState}
+        view={view} setView={setView} onOpenCuttingPlan={() => setShowCuttingPlan(true)}
+        roomCount={rooms.length} instanceCount={instances.length}
       />
-      <div className="flex flex-1 min-h-0">
-        <LeftSidebar
-          rooms={rooms} onAddRoom={() => setModal({ mode: "add" })} onEditRoom={(r) => setModal({ mode: "edit", room: r })}
-          onDeleteRoom={handleDeleteRoom} onDuplicateRoom={handleDuplicateRoom} onQuantityChange={handleQuantityChange} onUndoJoin={handleUndoJoin}
-          onPlaceOnCarpet={placeRoomOnCarpet}
-          rollWidth={rollWidth} setRollWidth={setRollWidth} unit={unit} setUnit={setUnit}
-          tolerance={tolerance} setTolerance={setTolerance} grainMode={grainMode} setGrainMode={setGrainMode}
-          gridSize={gridSize} setGridSize={setGridSize} snapEnabled={snapEnabled} setSnapEnabled={setSnapEnabled}
-          allowOverlap={allowOverlap} setAllowOverlap={setAllowOverlap}
-          guillotineMode={guillotineMode} setGuillotineMode={setGuillotineMode}
+
+      {view === "cutting" ? (
+        <div className="flex flex-1 min-h-0">
+          <RoomTray
+            rooms={rooms} placedByRoom={placedByRoom} remaining={totals.remaining}
+            onPlaceOnCarpet={placeRoomOnCarpet} onPlaceAll={placeAllRemaining} onAddRoom={openAddRoom}
+          />
+          <CuttingCanvas
+            rooms={rooms} roomsById={roomsById} instances={instances} setInstances={setInstances}
+            rollWidth={rollWidth} tolerance={tolerance} gridSize={gridSize} snapEnabled={snapEnabled}
+            selectedId={selectedId} setSelectedId={setSelectedId} commitHistory={commitHistory}
+            allowOverlap={allowOverlap} stats={stats}
+            onAutoArrange={runAutoArrange} arranging={arranging}
+            onPlaceAll={placeAllRemaining} onGoToRooms={() => setView("rooms")}
+            selectionActions={{ onRotate: rotateSelected, onDuplicate: duplicateSelected, onDelete: deleteSelected }}
+            rotationLocked={grainMode === "locked"}
+            grainMode={grainMode} onPlanWithJoin={handlePlanWithJoin}
+          />
+          <LayoutSidebar
+            selectedInstance={selectedInstance} selectedRoom={selectedRoom} stats={stats} settings={settings}
+            inspectorProps={{
+              onRotate: rotateSelected, onDelete: deleteSelected, onDuplicate: duplicateSelected,
+              onAllowanceChange: updateAllowanceOverride, onEditRoom: openEditRoom,
+              onDeselect: () => setSelectedId(null), unit, rotationLocked: grainMode === "locked",
+            }}
+          />
+        </div>
+      ) : (
+        <RoomsView
+          rooms={rooms} placedByRoom={placedByRoom} unit={unit}
+          onAddRoom={openAddRoom} onEditRoom={openEditRoom}
+          onDeleteRoom={handleDeleteRoom} onDuplicateRoom={handleDuplicateRoom} onQuantityChange={handleQuantityChange}
+          onPlaceOnCarpet={placeRoomOnCarpet} onPlaceAll={placeAllRemaining} onGoToLayout={() => setView("cutting")}
+          settings={settings} totals={totals} lengthLabel={stats.lengthLabel} grippers={stats.grippers} gripperSub={stats.gripperSub} onUndoJoin={handleUndoJoin}
+          projectName={projectName} setProjectName={setProjectName} onOpenHelp={() => setShowHelp(true)}
         />
-        {view === "cutting" ? (
-          <>
-            <CuttingCanvas
-              rooms={rooms} roomsById={roomsById} instances={instances} setInstances={setInstances}
-              rollWidth={rollWidth} tolerance={tolerance} gridSize={gridSize} snapEnabled={snapEnabled}
-              selectedId={selectedId} setSelectedId={setSelectedId} commitHistory={commitHistory}
-              allowOverlap={allowOverlap} grainMode={grainMode} onPlanWithJoin={handlePlanWithJoin}
-            />
-            <RightSidebar
-              instance={selectedInstance} room={selectedRoom} onRotate={rotateSelected} onDelete={deleteSelected}
-              onDuplicate={duplicateSelected} onAllowanceChange={updateAllowanceOverride} unit={unit}
-            />
-          </>
-        ) : (
-          <div className="flex-1 flex items-center justify-center bg-[#f7f5f0] p-8">
-            <div className="max-w-md text-center text-stone-500 text-sm">
-              <Layers size={28} className="mx-auto mb-3 text-[#c98a3a]" />
-              <p className="font-medium text-stone-700 mb-1">Build your room library, then switch to Cutting Plan</p>
-              <p>Draw each room once, set its quantity, then head to the Cutting Plan tab to drag rooms onto the carpet roll and find the most efficient layout.</p>
-            </div>
-          </div>
-        )}
-      </div>
+      )}
 
       {modal && (
         <AddRoomModal
           initialRoom={modal.mode === "edit" ? modal.room : null}
+          initialTemplate={modal.template || null}
           onClose={() => setModal(null)}
           onSave={handleSaveRoom}
-          displayUnit={unit}
+          displayUnit={unit} inputUnit={inputUnit}
         />
       )}
       {showCuttingPlan && (
         <CuttingPlanModal
           onClose={() => setShowCuttingPlan(false)}
-          rooms={rooms} roomsById={roomsById} instances={instances} rollWidth={rollWidth}
-          projectName={projectName} reqLength={reqLength}
+          roomsById={roomsById} instances={instances} rollWidth={rollWidth}
+          projectName={projectName} reqLength={reqLength} stats={stats}
         />
       )}
+      {showHelp && <HelpModal onClose={() => setShowHelp(false)} />}
+      <Toast toast={toast} onDismiss={() => setToast(null)} />
     </div>
   );
 }
